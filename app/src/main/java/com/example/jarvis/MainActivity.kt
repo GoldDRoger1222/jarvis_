@@ -22,7 +22,7 @@ import java.util.Locale
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
-    private val model = "gemini-2.5-flash"
+    private val model = "gemini-3.8-flash"
     private val system = "You are Jarvis, a friendly voice assistant on an Android phone. " +
         "Reply in the same language the user speaks (Bangla or English). " +
         "Keep answers short and conversational, 1 to 3 sentences. No markdown, no emojis, no lists."
