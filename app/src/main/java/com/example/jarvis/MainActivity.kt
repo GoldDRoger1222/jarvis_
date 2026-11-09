@@ -16,7 +16,6 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
     private lateinit var gemBox: EditText
-    private lateinit var picoBox: EditText
     private lateinit var langBtn: Button
     private lateinit var startBtn: Button
     private lateinit var status: TextView
@@ -34,13 +33,11 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(p, p, p, p)
         }
-        fun field(h: String, k: String) = EditText(this).apply {
-            hint = h
+        gemBox = EditText(this).apply {
+            hint = "Gemini API key"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(prefs().getString(k, ""))
+            setText(prefs().getString("k", ""))
         }
-        gemBox = field("Gemini API key", "k")
-        picoBox = field("Picovoice AccessKey", "p")
         langBtn = Button(this).apply { setOnClickListener { toggleLang() } }
         startBtn = Button(this).apply {
             textSize = 18f
@@ -57,7 +54,7 @@ class MainActivity : Activity() {
         status = TextView(this).apply { textSize = 16f }
         log = TextView(this).apply { textSize = 15f }
         scroll = ScrollView(this).apply { addView(log) }
-        listOf(gemBox, picoBox, langBtn, startBtn, talkBtn, batBtn, status).forEach { root.addView(it) }
+        listOf(gemBox, langBtn, startBtn, talkBtn, batBtn, status).forEach { root.addView(it) }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
         refreshLang()
@@ -78,14 +75,8 @@ class MainActivity : Activity() {
     }
 
     private fun go(action: String?) {
-        prefs().edit()
-            .putString("k", gemBox.text.toString().trim())
-            .putString("p", picoBox.text.toString().trim())
-            .apply()
+        prefs().edit().putString("k", gemBox.text.toString().trim()).apply()
         if (prefs().getString("k", "").isNullOrEmpty()) { status.text = "Gemini key dao"; return }
-        if (action == null && prefs().getString("p", "").isNullOrEmpty()) {
-            status.text = "Picovoice AccessKey dao"; return
-        }
         val need = mutableListOf<String>()
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             need.add(Manifest.permission.RECORD_AUDIO)
