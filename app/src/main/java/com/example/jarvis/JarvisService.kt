@@ -1,8 +1,5 @@
 package com.example.jarvis
 
-import ai.picovoice.porcupine.Porcupine
-import ai.picovoice.porcupine.PorcupineManager
-import ai.picovoice.porcupine.PorcupineManagerCallback
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -40,18 +37,22 @@ class JarvisService : Service() {
     private val system = "You are Jarvis, a friendly voice assistant on an Android phone. " +
         "Reply in the same language the user speaks (Bangla or English). " +
         "Keep answers short and conversational, 1 to 3 sentences. No markdown, no emojis, no lists."
+    private val wakeWords = listOf("jarvis", "jarvice", "jervis", "javis",
+        "জার্ভিস", "জারভিস", "জার্বিস", "জারবিস")
 
     private val ui = Handler(Looper.getMainLooper())
     private val history = JSONArray()
-    private var porcupine: PorcupineManager? = null
     private var rec: SpeechRecognizer? = null
     private lateinit var tts: TextToSpeech
+    private var waking = false
     private var talking = false
     private var endAfter = false
     private var misses = 0
+    private var errs = 0
 
     private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
     private fun lang() = prefs().getString("l", "bn-BD") ?: "bn-BD"
+    private fun ack() = if (lang() == "bn-BD") "জি, বলুন" else "Yes?"
 
     private fun say(s: String) { statusText = s; onStatus?.invoke(s) }
     private fun addLog(who: String, t: String) {
@@ -101,32 +102,42 @@ class JarvisService : Service() {
 
     private fun startWake() {
         if (talking) return
-        val key = prefs().getString("p", "")?.trim() ?: ""
-        if (key.isEmpty()) { say("Picovoice key dao"); return }
-        try {
-            if (porcupine == null) {
-                porcupine = PorcupineManager.Builder()
-                    .setAccessKey(key)
-                    .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
-                    .setSensitivity(0.7f)
-                    .build(applicationContext, PorcupineManagerCallback { ui.post { onWake() } })
-            }
-            porcupine?.start()
-            say("Jarvis dak shunchi...")
-        } catch (e: Exception) {
-            say("Wake word error: ${e.message}")
+        waking = true
+        errs = 0
+        say("Jarvis dak shunchi...")
+        listen()
+    }
+
+    private fun handleWake(t: String) {
+        val l = t.lowercase()
+        var at = -1
+        var len = 0
+        for (w in wakeWords) {
+            val i = l.indexOf(w)
+            if (i >= 0) { at = i; len = w.length; break }
         }
+        if (at < 0) { ui.postDelayed({ listen() }, 200); return }
+        val rest = l.substring(at + len).trim(' ', ',', '.', '!', '?', '।')
+        ui.removeCallbacksAndMessages(null)
+        waking = false
+        talking = true
+        endAfter = false
+        misses = 0
+        tts.setLanguage(Locale.forLanguageTag(lang()))
+        if (rest.length > 2) handle(rest) else { say("Haan bolo..."); speakOrListen(ack()) }
     }
 
     private fun onWake() {
         if (talking) return
+        ui.removeCallbacksAndMessages(null)
+        rec?.cancel()
+        waking = false
         talking = true
         endAfter = false
         misses = 0
-        try { porcupine?.stop() } catch (e: Exception) {}
         tts.setLanguage(Locale.forLanguageTag(lang()))
         say("Haan bolo...")
-        speakOrListen(if (lang() == "bn-BD") "জি, বলুন" else "Yes?")
+        speakOrListen(ack())
     }
 
     private fun speakOrListen(t: String) {
@@ -140,23 +151,38 @@ class JarvisService : Service() {
     }
 
     private fun listen() {
-        if (!talking) return
+        if (!talking && !waking) return
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            say("Speech service nai"); endTalk(); return
+            say("Phone e speech service nai")
+            waking = false; talking = false
+            return
         }
         rec?.destroy()
         rec = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(p: Bundle?) { say("Shunchi...") }
+                override fun onReadyForSpeech(p: Bundle?) {
+                    errs = 0
+                    if (talking) say("Shunchi...")
+                }
                 override fun onResults(r: Bundle?) {
                     val t = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                    if (t.isNullOrBlank()) miss() else { misses = 0; handle(t) }
+                    if (t.isNullOrBlank()) {
+                        if (waking) ui.postDelayed({ listen() }, 200) else miss()
+                    } else if (waking) handleWake(t)
+                    else { misses = 0; handle(t) }
                 }
                 override fun onError(e: Int) {
-                    if (!talking) return
-                    if (e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) miss()
-                    else if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) ui.postDelayed({ listen() }, 700)
-                    else { say("Mic error $e"); endTalk() }
+                    if (!talking && !waking) return
+                    if (e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        if (waking) ui.postDelayed({ listen() }, 300) else miss()
+                    } else if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                        ui.postDelayed({ listen() }, 700)
+                    } else if (waking && ++errs <= 5) {
+                        ui.postDelayed({ listen() }, 2000)
+                    } else {
+                        say("Mic error $e. Jarvis Chalu Koro abar tap koro")
+                        waking = false; talking = false
+                    }
                 }
                 override fun onBeginningOfSpeech() {}
                 override fun onRmsChanged(v: Float) {}
@@ -243,9 +269,9 @@ class JarvisService : Service() {
     private fun endTalk() {
         talking = false
         endAfter = false
-        rec?.cancel()
-        rec?.destroy()
+        val r = rec
         rec = null
+        ui.post { r?.cancel(); r?.destroy() }
         tts.stop()
         ui.postDelayed({ startWake() }, 600)
     }
@@ -253,8 +279,8 @@ class JarvisService : Service() {
     override fun onDestroy() {
         running = false
         talking = false
+        waking = false
         ui.removeCallbacksAndMessages(null)
-        try { porcupine?.delete() } catch (e: Exception) {}
         rec?.destroy()
         tts.shutdown()
         say("Jarvis bondho")
