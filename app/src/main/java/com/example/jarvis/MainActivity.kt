@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -22,7 +23,7 @@ class MainActivity : Activity() {
     private lateinit var log: TextView
     private lateinit var scroll: ScrollView
     private var pending: String? = null
-    private var askedNotif = false
+    private var askedExtra = false
 
     private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
 
@@ -48,13 +49,23 @@ class MainActivity : Activity() {
         }
         val talkBtn = Button(this).apply { text = "Ekhoni kotha bolo"; setOnClickListener { go("TALK") } }
         val batBtn = Button(this).apply {
-            text = "Battery optimization bondho koro"
+            text = "1. Battery optimization bondho koro"
             setOnClickListener { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }
+        val accBtn = Button(this).apply {
+            text = "2. Accessibility chalu koro"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        }
+        val ovBtn = Button(this).apply {
+            text = "3. Display over other apps dao"
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            }
         }
         status = TextView(this).apply { textSize = 16f }
         log = TextView(this).apply { textSize = 15f }
         scroll = ScrollView(this).apply { addView(log) }
-        listOf(gemBox, langBtn, startBtn, talkBtn, batBtn, status).forEach { root.addView(it) }
+        listOf(gemBox, langBtn, startBtn, talkBtn, batBtn, accBtn, ovBtn, status).forEach { root.addView(it) }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
         refreshLang()
@@ -74,18 +85,23 @@ class MainActivity : Activity() {
         startBtn.text = if (JarvisService.running) "Jarvis Bondho Koro" else "Jarvis Chalu Koro"
     }
 
+    private fun missing(p: String) = checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED
+
     private fun go(action: String?) {
         prefs().edit().putString("k", gemBox.text.toString().trim()).apply()
         if (prefs().getString("k", "").isNullOrEmpty()) { status.text = "Gemini key dao"; return }
         val need = mutableListOf<String>()
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-            need.add(Manifest.permission.RECORD_AUDIO)
-        if (Build.VERSION.SDK_INT >= 33 && !askedNotif &&
-            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
-            need.add("android.permission.POST_NOTIFICATIONS")
+        if (missing(Manifest.permission.RECORD_AUDIO)) need.add(Manifest.permission.RECORD_AUDIO)
+        if (!askedExtra) {
+            askedExtra = true
+            val extra = mutableListOf(
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.SEND_SMS)
+            if (Build.VERSION.SDK_INT >= 33) extra.add("android.permission.POST_NOTIFICATIONS")
+            for (p in extra) if (missing(p)) need.add(p)
         }
         if (need.isNotEmpty()) {
-            askedNotif = true
             pending = action
             requestPermissions(need.toTypedArray(), 1)
             return
