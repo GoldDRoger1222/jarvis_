@@ -1,27 +1,42 @@
 package com.example.jarvis
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.AlarmClock
+import android.provider.ContactsContract
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.telephony.SmsManager
+import android.view.KeyEvent
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class JarvisService : Service() {
@@ -34,11 +49,22 @@ class JarvisService : Service() {
     }
 
     private val model = "gemini-3.5-flash-lite"
-    private val system = "You are Jarvis, a friendly voice assistant on an Android phone. " +
+    private val system = "You are Jarvis, a friendly voice assistant that can control an Android phone with tools. " +
         "Reply in the same language the user speaks (Bangla or English). " +
-        "Keep answers short and conversational, 1 to 3 sentences. No markdown, no emojis, no lists."
+        "Keep spoken replies short, 1 to 2 sentences. No markdown, no emojis, no lists. " +
+        "For web or YouTube searches prefer open_url, for example https://www.youtube.com/results?search_query=lofi or https://www.google.com/search?q=weather. " +
+        "For tasks inside other apps: open_app, then read_screen to see what is there, then tap or type_text, and read_screen again to check. " +
+        "Pass English app names to open_app. Never type passwords, OTPs, PINs or card numbers. " +
+        "Sensitive actions such as calls, SMS and tapping send, pay or delete buttons ask the user for confirmation automatically, so just go ahead and call the tool. " +
+        "If the user declines, stop and say so. When the task is done, say so briefly."
     private val wakeWords = listOf("jarvis", "jarvice", "jervis", "javis",
         "জার্ভিস", "জারভিস", "জার্বিস", "জারবিস")
+    private val sensitive = listOf("send", "pay", "buy", "order", "purchase", "confirm", "transfer",
+        "delete", "remove", "submit", "post", "checkout", "uninstall", "reset", "erase", "call", "dial",
+        "পাঠা", "কিন", "পেমেন্ট", "মুছ", "অর্ডার", "নিশ্চিত", "ফোন")
+    private val yesWords = setOf("yes", "yeah", "yep", "ok", "okay", "sure", "confirm", "ha", "han", "haan",
+        "হ্যাঁ", "হ্যা", "হা", "করো", "করুন", "পাঠাও", "জি", "হ্যাঁ।")
+    private val noWords = setOf("no", "nope", "cancel", "na", "nah", "না", "থাক", "বাদ", "থামো", "stop")
 
     private val ui = Handler(Looper.getMainLooper())
     private val history = JSONArray()
@@ -49,10 +75,12 @@ class JarvisService : Service() {
     private var endAfter = false
     private var misses = 0
     private var errs = 0
+    private var confirmQ: LinkedBlockingQueue<Boolean>? = null
 
     private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
     private fun lang() = prefs().getString("l", "bn-BD") ?: "bn-BD"
-    private fun ack() = if (lang() == "bn-BD") "জি, বলুন" else "Yes?"
+    private fun tr(bn: String, en: String) = if (lang() == "bn-BD") bn else en
+    private fun ack() = tr("জি, বলুন", "Yes?")
 
     private fun say(s: String) { statusText = s; onStatus?.invoke(s) }
     private fun addLog(who: String, t: String) {
@@ -205,47 +233,143 @@ class JarvisService : Service() {
 
     private fun handle(t: String) {
         addLog("Tumi", t)
+        val low = t.lowercase()
+        confirmQ?.let { qq ->
+            val w = low.split(' ', ',', '.', '!', '?', '।').filter { it.isNotEmpty() }
+            val no = w.any { it in noWords } || low.contains("don't")
+            val yes = w.any { it in yesWords } || low.contains("ঠিক আছে") || low.contains("go ahead")
+            if (no) qq.offer(false)
+            else if (yes) qq.offer(true)
+            else speakOrListen(tr("হ্যাঁ বা না বলুন", "Please say yes or no"))
+            return
+        }
         val stopWords = setOf("stop", "goodbye", "thamo", "bondho", "বন্ধ", "থামো")
-        if (stopWords.contains(t.lowercase().trim().trimEnd('.'))) {
+        if (stopWords.contains(low.trim().trimEnd('.'))) {
             endAfter = true
-            speakOrListen(if (lang() == "bn-BD") "ঠিক আছে" else "Okay")
+            speakOrListen(tr("ঠিক আছে", "Okay"))
             return
         }
         ask(t)
     }
 
+    private fun confirm(question: String): Boolean {
+        val qq = LinkedBlockingQueue<Boolean>()
+        ui.post {
+            confirmQ = qq
+            misses = 0
+            addLog("Jarvis", question)
+            speakOrListen(question)
+        }
+        val r = qq.poll(45, TimeUnit.SECONDS)
+        ui.post { confirmQ = null }
+        return r == true
+    }
+
+    // ---------- Gemini ----------
+
     private fun msg(role: String, text: String) = JSONObject().put("role", role)
         .put("parts", JSONArray().put(JSONObject().put("text", text)))
 
+    private fun fn(name: String, desc: String, vararg p: Pair<String, String>): JSONObject {
+        val o = JSONObject().put("name", name).put("description", desc)
+        if (p.isNotEmpty()) {
+            val props = JSONObject()
+            val req = JSONArray()
+            for ((k, t) in p) { props.put(k, JSONObject().put("type", t)); req.put(k) }
+            o.put("parameters", JSONObject().put("type", "object").put("properties", props).put("required", req))
+        }
+        return o
+    }
+
+    private val tools: JSONArray by lazy {
+        JSONArray().put(JSONObject().put("functionDeclarations", JSONArray()
+            .put(fn("open_app", "Open an installed app by name", "app_name" to "string"))
+            .put(fn("open_url", "Open a web link in the browser or matching app", "url" to "string"))
+            .put(fn("set_alarm", "Set an alarm", "hour" to "integer", "minute" to "integer", "label" to "string"))
+            .put(fn("set_timer", "Start a countdown timer", "seconds" to "integer", "label" to "string"))
+            .put(fn("make_call", "Call a contact name or phone number", "who" to "string"))
+            .put(fn("send_sms", "Send an SMS to a contact name or number", "to" to "string", "message" to "string"))
+            .put(fn("flashlight", "Turn the flashlight on or off", "on" to "boolean"))
+            .put(fn("set_volume", "Set media volume 0 to 100 percent", "percent" to "integer"))
+            .put(fn("media_control", "Control media playback: play_pause, next or previous", "action" to "string"))
+            .put(fn("read_screen", "Read the text currently visible on the phone screen"))
+            .put(fn("tap", "Tap a button or item on screen by its visible text", "text" to "string"))
+            .put(fn("type_text", "Type text into the focused input field", "text" to "string"))
+            .put(fn("scroll", "Scroll the screen, direction is up or down", "direction" to "string"))
+            .put(fn("press_key", "Press a system key: back, home or recents", "key" to "string"))
+        ))
+    }
+
+    private fun trimHistory() {
+        while (history.length() > 30) history.remove(0)
+        while (history.length() > 0) {
+            val f = history.getJSONObject(0)
+            val p = f.optJSONArray("parts")?.optJSONObject(0)
+            if (f.optString("role") == "user" && p != null && p.has("text")) break
+            history.remove(0)
+        }
+    }
+
     private fun ask(text: String) {
+        trimHistory()
+        val mark = history.length()
         history.put(msg("user", text))
         say("Bhabchi...")
         val key = prefs().getString("k", "")?.trim() ?: ""
         thread {
             try {
-                var raw = ""
-                for (i in 1..3) {
-                    try { raw = gemini(key); break } catch (e: Exception) {
-                        val m = e.message ?: ""
-                        if (i == 3 || !(m.contains("503") || m.contains("timeout"))) throw e
-                        Thread.sleep(2000)
+                var reply = ""
+                var finished = false
+                for (step in 1..12) {
+                    val content = callGemini(key)
+                    history.put(content)
+                    val parts = content.optJSONArray("parts") ?: JSONArray()
+                    val calls = ArrayList<JSONObject>()
+                    val sb = StringBuilder()
+                    for (i in 0 until parts.length()) {
+                        val p = parts.getJSONObject(i)
+                        if (p.has("functionCall")) calls.add(p.getJSONObject("functionCall"))
+                        else if (p.has("text") && !p.optBoolean("thought")) sb.append(p.getString("text"))
                     }
+                    if (calls.isEmpty()) { reply = sb.toString(); finished = true; break }
+                    val resp = JSONArray()
+                    for (c in calls) {
+                        val name = c.getString("name")
+                        val args = c.optJSONObject("args") ?: JSONObject()
+                        ui.post { say("Kaj korchi: $name") }
+                        val out = try { runTool(name, args) } catch (e: Exception) { "Error: ${e.message}" }
+                        resp.put(JSONObject().put("functionResponse", JSONObject()
+                            .put("name", name)
+                            .put("response", JSONObject().put("result", out))))
+                    }
+                    history.put(JSONObject().put("role", "user").put("parts", resp))
                 }
-                val reply = raw.replace("*", "").trim()
+                if (!finished) reply = tr("কাজটা শেষ করতে পারিনি", "I could not finish the task")
+                val clean = reply.replace("*", "").trim()
                 ui.post {
                     if (!talking) return@post
-                    history.put(msg("model", reply))
-                    if (history.length() > 20) { history.remove(0); history.remove(0) }
-                    addLog("Jarvis", reply)
-                    if (reply.isEmpty()) listen() else { say("Bolchi..."); speakOrListen(reply) }
+                    addLog("Jarvis", clean)
+                    if (clean.isEmpty()) listen() else { say("Bolchi..."); speakOrListen(clean) }
                 }
             } catch (e: Exception) {
+                while (history.length() > mark) history.remove(history.length() - 1)
                 ui.post { say("Error: ${e.message}"); addLog("Error", e.message ?: ""); endTalk() }
             }
         }
     }
 
-    private fun gemini(key: String): String {
+    private fun callGemini(key: String): JSONObject {
+        for (i in 1..3) {
+            try { return geminiOnce(key) } catch (e: Exception) {
+                val m = e.message ?: ""
+                if (i == 3 || !(m.contains("503") || m.contains("timeout"))) throw e
+                Thread.sleep(2000)
+            }
+        }
+        throw Exception("Gemini error")
+    }
+
+    private fun geminiOnce(key: String): JSONObject {
         val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             .openConnection() as HttpURLConnection
         c.requestMethod = "POST"
@@ -254,21 +378,158 @@ class JarvisService : Service() {
         c.connectTimeout = 15000
         c.readTimeout = 60000
         c.doOutput = true
+        val now = SimpleDateFormat("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH).format(Date())
         val body = JSONObject()
             .put("system_instruction", JSONObject().put("parts",
-                JSONArray().put(JSONObject().put("text", system))))
+                JSONArray().put(JSONObject().put("text", "$system Current date and time: $now."))))
             .put("contents", history)
+            .put("tools", tools)
         c.outputStream.use { it.write(body.toString().toByteArray()) }
         val ok = c.responseCode in 200..299
         val txt = (if (ok) c.inputStream else c.errorStream).bufferedReader().readText()
         if (!ok) throw Exception("API ${c.responseCode}: ${txt.take(200)}")
-        return JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
-            .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+        val content = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
+            .optJSONObject("content") ?: throw Exception("Empty reply from Gemini")
+        if (!content.has("role")) content.put("role", "model")
+        return content
     }
+
+    // ---------- Tools ----------
+
+    private fun launch(i: Intent): Boolean {
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val ctx: Context = JarvisAccess.inst ?: this
+        return try { ctx.startActivity(i); true } catch (e: Exception) { false }
+    }
+
+    private fun runTool(name: String, a: JSONObject): String {
+        return when (name) {
+            "open_app" -> { val r = openApp(a.optString("app_name")); Thread.sleep(2000); r }
+            "open_url" -> {
+                var u = a.optString("url")
+                if (!u.startsWith("http")) u = "https://$u"
+                val r = if (launch(Intent(Intent.ACTION_VIEW, Uri.parse(u)))) "Opened $u" else "Could not open the link"
+                Thread.sleep(1500); r
+            }
+            "set_alarm" -> {
+                val i = Intent(AlarmClock.ACTION_SET_ALARM)
+                    .putExtra(AlarmClock.EXTRA_HOUR, a.optInt("hour"))
+                    .putExtra(AlarmClock.EXTRA_MINUTES, a.optInt("minute"))
+                    .putExtra(AlarmClock.EXTRA_MESSAGE, a.optString("label"))
+                    .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                if (launch(i)) "Alarm set" else "Could not set the alarm"
+            }
+            "set_timer" -> {
+                val i = Intent(AlarmClock.ACTION_SET_TIMER)
+                    .putExtra(AlarmClock.EXTRA_LENGTH, a.optInt("seconds"))
+                    .putExtra(AlarmClock.EXTRA_MESSAGE, a.optString("label"))
+                    .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                if (launch(i)) "Timer started" else "Could not start the timer"
+            }
+            "make_call" -> makeCall(a.optString("who"))
+            "send_sms" -> sendSms(a.optString("to"), a.optString("message"))
+            "flashlight" -> flash(a.optBoolean("on"))
+            "set_volume" -> {
+                val am = getSystemService(AudioManager::class.java)
+                val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                am.setStreamVolume(AudioManager.STREAM_MUSIC, a.optInt("percent").coerceIn(0, 100) * max / 100, 0)
+                "Volume set"
+            }
+            "media_control" -> {
+                val code = when (a.optString("action")) {
+                    "next" -> KeyEvent.KEYCODE_MEDIA_NEXT
+                    "previous" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+                    else -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                }
+                val am = getSystemService(AudioManager::class.java)
+                am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+                "Done"
+            }
+            "read_screen", "tap", "type_text", "scroll", "press_key" -> uiTool(name, a)
+            else -> "Unknown tool"
+        }
+    }
+
+    private fun openApp(name: String): String {
+        val pm = packageManager
+        val list = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
+        val q = name.lowercase().trim()
+        val hit = list.firstOrNull { it.loadLabel(pm).toString().lowercase() == q }
+            ?: list.firstOrNull { it.loadLabel(pm).toString().lowercase().contains(q) }
+            ?: return "App not found: $name"
+        val li = pm.getLaunchIntentForPackage(hit.activityInfo.packageName) ?: return "Cannot launch that app"
+        return if (launch(li)) "Opened ${hit.loadLabel(pm)}"
+        else "Could not open the app. The user may need to allow Display over other apps for Jarvis."
+    }
+
+    private fun resolveNumber(who: String): String? {
+        val digits = who.filter { it.isDigit() || it == '+' }
+        if (digits.length >= 6 && who.none { it.isLetter() }) return digits
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+        val c = contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?",
+            arrayOf("%$who%"), null)
+        c?.use { if (it.moveToFirst()) return it.getString(0) }
+        return null
+    }
+
+    private fun makeCall(who: String): String {
+        val num = resolveNumber(who) ?: return "No number found for $who (contacts permission may be missing)"
+        if (!confirm(tr("$who কে ফোন করব?", "Call $who?"))) return "User declined"
+        val ok = checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        val i = Intent(if (ok) Intent.ACTION_CALL else Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(num)))
+        return if (launch(i)) "Calling $who" else "Could not start the call"
+    }
+
+    private fun sendSms(to: String, body: String): String {
+        val num = resolveNumber(to) ?: return "No number found for $to (contacts permission may be missing)"
+        if (checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED)
+            return "SMS permission is missing"
+        if (!confirm(tr("$to কে মেসেজ পাঠাব: $body ?", "Send to $to: $body ?"))) return "User declined"
+        val sm = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java)
+        else SmsManager.getDefault()
+        sm.sendMultipartTextMessage(num, null, sm.divideMessage(body), null, null)
+        return "SMS sent"
+    }
+
+    private fun flash(on: Boolean): String {
+        val cm = getSystemService(CameraManager::class.java)
+        val id = cm.cameraIdList.firstOrNull {
+            cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        } ?: return "No flashlight on this phone"
+        cm.setTorchMode(id, on)
+        return if (on) "Flashlight on" else "Flashlight off"
+    }
+
+    private fun uiTool(name: String, a: JSONObject): String {
+        val s = JarvisAccess.inst
+            ?: return "Accessibility service is off. Ask the user to turn on Jarvis in Accessibility settings."
+        return when (name) {
+            "read_screen" -> s.readScreen()
+            "tap" -> {
+                val t = a.optString("text")
+                val l = t.lowercase()
+                if (sensitive.any { l.contains(it) } &&
+                    !confirm(tr("'$t' চাপব? নিশ্চিত?", "Tap '$t'? Are you sure?"))) return "User declined"
+                val r = s.tap(t)
+                Thread.sleep(1200)
+                r
+            }
+            "type_text" -> { val r = s.typeText(a.optString("text")); Thread.sleep(400); r }
+            "scroll" -> { val r = s.scroll(a.optString("direction") != "up"); Thread.sleep(600); r }
+            else -> s.key(a.optString("key"))
+        }
+    }
+
+    // ---------- End ----------
 
     private fun endTalk() {
         talking = false
         endAfter = false
+        confirmQ?.offer(false)
         val r = rec
         rec = null
         ui.post { r?.cancel(); r?.destroy() }
@@ -280,6 +541,7 @@ class JarvisService : Service() {
         running = false
         talking = false
         waking = false
+        confirmQ?.offer(false)
         ui.removeCallbacksAndMessages(null)
         rec?.destroy()
         tts.shutdown()
