@@ -162,7 +162,15 @@ class MainActivity : Activity() {
         val key = keyBox.text.toString().trim()
         thread {
             try {
-                val reply = gemini(key).replace("*", "").trim()
+                var raw = ""
+for (i in 1..3) {
+    try { raw = gemini(key); break } catch (e: Exception) {
+        val m = e.message ?: ""
+        if (i == 3 || !(m.contains("503") || m.contains("timeout"))) throw e
+        Thread.sleep(2000)
+    }
+}
+val reply = raw.replace("*", "").trim()
                 ui.post {
                     history.put(msg("model", reply))
                     add("Jarvis", reply)
