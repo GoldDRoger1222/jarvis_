@@ -4,42 +4,28 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
+import android.provider.Settings
 import android.text.InputType
-import android.widget.*
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Locale
-import kotlin.concurrent.thread
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 
 class MainActivity : Activity() {
-    private val model = "gemini-3.5-flash-lite"
-    private val system = "You are Jarvis, a friendly voice assistant on an Android phone. " +
-        "Reply in the same language the user speaks (Bangla or English). " +
-        "Keep answers short and conversational, 1 to 3 sentences. No markdown, no emojis, no lists."
-
-    private lateinit var tts: TextToSpeech
-    private var rec: SpeechRecognizer? = null
-    private val ui = Handler(Looper.getMainLooper())
-    private val history = JSONArray()
-    private var active = false
-    private var lang = "bn-BD"
-
-    private lateinit var keyBox: EditText
+    private lateinit var gemBox: EditText
+    private lateinit var picoBox: EditText
+    private lateinit var langBtn: Button
+    private lateinit var startBtn: Button
     private lateinit var status: TextView
     private lateinit var log: TextView
     private lateinit var scroll: ScrollView
-    private lateinit var mic: Button
-    private lateinit var langBtn: Button
+    private var pending: String? = null
+    private var askedNotif = false
+
+    private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -48,174 +34,97 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(p, p, p, p)
         }
-        keyBox = EditText(this).apply {
-            hint = "Gemini API key"
+        fun field(h: String, k: String) = EditText(this).apply {
+            hint = h
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(getSharedPreferences("j", MODE_PRIVATE).getString("k", ""))
+            setText(prefs().getString(k, ""))
         }
-        langBtn = Button(this).apply {
-            text = "Bhasha: Bangla"
-            setOnClickListener { toggleLang() }
+        gemBox = field("Gemini API key", "k")
+        picoBox = field("Picovoice AccessKey", "p")
+        langBtn = Button(this).apply { setOnClickListener { toggleLang() } }
+        startBtn = Button(this).apply {
+            textSize = 18f
+            setOnClickListener {
+                if (JarvisService.running) stopService(Intent(this@MainActivity, JarvisService::class.java))
+                else go(null)
+            }
         }
-        status = TextView(this).apply { text = "Mic tap koro"; textSize = 16f }
+        val talkBtn = Button(this).apply { text = "Ekhoni kotha bolo"; setOnClickListener { go("TALK") } }
+        val batBtn = Button(this).apply {
+            text = "Battery optimization bondho koro"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }
+        status = TextView(this).apply { textSize = 16f }
         log = TextView(this).apply { textSize = 15f }
         scroll = ScrollView(this).apply { addView(log) }
-        mic = Button(this).apply {
-            text = "Shuru"
-            textSize = 20f
-            setOnClickListener { toggle() }
-        }
-        root.addView(keyBox)
-        root.addView(langBtn)
-        root.addView(status)
+        listOf(gemBox, picoBox, langBtn, startBtn, talkBtn, batBtn, status).forEach { root.addView(it) }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(mic, LinearLayout.LayoutParams(-1, -2))
         setContentView(root)
-
-        tts = TextToSpeech(this) { ui.post { applyLang() } }
-        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(id: String?) {}
-            override fun onDone(id: String?) { ui.post { if (active) listen() } }
-            override fun onError(id: String?) { ui.post { if (active) listen() } }
-        })
+        refreshLang()
     }
 
-    private fun applyLang() {
-        val r = tts.setLanguage(Locale.forLanguageTag(lang))
-        if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED)
-            Toast.makeText(this, "Google TTS e $lang voice install koro", Toast.LENGTH_LONG).show()
+    private fun refreshLang() {
+        langBtn.text = if (prefs().getString("l", "bn-BD") == "bn-BD") "Bhasha: Bangla" else "Bhasha: English"
     }
 
     private fun toggleLang() {
-        lang = if (lang == "bn-BD") "en-US" else "bn-BD"
-        langBtn.text = if (lang == "bn-BD") "Bhasha: Bangla" else "Bhasha: English"
-        applyLang()
+        val next = if (prefs().getString("l", "bn-BD") == "bn-BD") "en-US" else "bn-BD"
+        prefs().edit().putString("l", next).apply()
+        refreshLang()
     }
 
-    private fun toggle() {
-        if (active) { stopAll(); return }
-        val key = keyBox.text.toString().trim()
-        if (key.isEmpty()) { status.text = "Age API key dao"; return }
-        getSharedPreferences("j", MODE_PRIVATE).edit().putString("k", key).apply()
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+    private fun refresh() {
+        startBtn.text = if (JarvisService.running) "Jarvis Bondho Koro" else "Jarvis Chalu Koro"
+    }
+
+    private fun go(action: String?) {
+        prefs().edit()
+            .putString("k", gemBox.text.toString().trim())
+            .putString("p", picoBox.text.toString().trim())
+            .apply()
+        if (prefs().getString("k", "").isNullOrEmpty()) { status.text = "Gemini key dao"; return }
+        if (action == null && prefs().getString("p", "").isNullOrEmpty()) {
+            status.text = "Picovoice AccessKey dao"; return
+        }
+        val need = mutableListOf<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            need.add(Manifest.permission.RECORD_AUDIO)
+        if (Build.VERSION.SDK_INT >= 33 && !askedNotif &&
+            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+            need.add("android.permission.POST_NOTIFICATIONS")
+        }
+        if (need.isNotEmpty()) {
+            askedNotif = true
+            pending = action
+            requestPermissions(need.toTypedArray(), 1)
             return
         }
-        active = true
-        mic.text = "Thamo"
-        listen()
+        val i = Intent(this, JarvisService::class.java)
+        if (action != null) i.action = action
+        startForegroundService(i)
     }
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
         super.onRequestPermissionsResult(code, perms, res)
-        status.text = if (res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED)
-            "Abar Shuru tap koro" else "Mic permission dao"
-    }
-
-    private fun listen() {
-        if (!active) return
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            status.text = "Phone e speech service nai"; stopAll(); return
+        val i = perms.indexOf(Manifest.permission.RECORD_AUDIO)
+        if (i >= 0 && res[i] != PackageManager.PERMISSION_GRANTED) {
+            status.text = "Mic permission dao"; return
         }
-        rec?.destroy()
-        rec = SpeechRecognizer.createSpeechRecognizer(this).apply {
-            setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(p: Bundle?) { status.text = "Shunchi..." }
-                override fun onResults(r: Bundle?) {
-                    val t = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                    if (t.isNullOrBlank()) ui.postDelayed({ listen() }, 300) else ask(t)
-                }
-                override fun onError(e: Int) {
-                    if (!active) return
-                    if (e == SpeechRecognizer.ERROR_NO_MATCH ||
-                        e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
-                        e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY)
-                        ui.postDelayed({ listen() }, 500)
-                    else { status.text = "Mic error $e"; stopAll() }
-                }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(v: Float) {}
-                override fun onBufferReceived(b: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                override fun onPartialResults(p: Bundle?) {}
-                override fun onEvent(t: Int, p: Bundle?) {}
-            })
-            startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
-            })
-        }
+        go(pending)
     }
 
-    private fun msg(role: String, text: String) = JSONObject().put("role", role)
-        .put("parts", JSONArray().put(JSONObject().put("text", text)))
-
-    private fun add(who: String, text: String) {
-        log.append("$who: $text\n\n")
-        scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    override fun onResume() {
+        super.onResume()
+        JarvisService.onLog = { s -> log.append(s); scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) } }
+        JarvisService.onStatus = { s -> status.text = s; refresh() }
+        log.text = JarvisService.logBuf.toString()
+        status.text = JarvisService.statusText
+        refresh()
     }
 
-    private fun ask(text: String) {
-        add("Tumi", text)
-        history.put(msg("user", text))
-        status.text = "Bhabchi..."
-        val key = keyBox.text.toString().trim()
-        thread {
-            try {
-                var raw = ""
-for (i in 1..3) {
-    try { raw = gemini(key); break } catch (e: Exception) {
-        val m = e.message ?: ""
-        if (i == 3 || !(m.contains("503") || m.contains("timeout"))) throw e
-        Thread.sleep(2000)
-    }
-}
-val reply = raw.replace("*", "").trim()
-                ui.post {
-                    history.put(msg("model", reply))
-                    add("Jarvis", reply)
-                    if (reply.isEmpty()) listen() else {
-                        status.text = "Bolchi..."
-                        tts.speak(reply.take(3500), TextToSpeech.QUEUE_FLUSH, null, "j")
-                    }
-                }
-            } catch (e: Exception) {
-                ui.post { status.text = "Error: ${e.message}"; stopAll() }
-            }
-        }
-    }
-
-    private fun gemini(key: String): String {
-        val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
-            .openConnection() as HttpURLConnection
-        c.requestMethod = "POST"
-        c.setRequestProperty("Content-Type", "application/json")
-        c.setRequestProperty("x-goog-api-key", key)
-        c.connectTimeout = 15000
-        c.readTimeout = 60000
-        c.doOutput = true
-        val body = JSONObject()
-            .put("system_instruction", JSONObject().put("parts",
-                JSONArray().put(JSONObject().put("text", system))))
-            .put("contents", history)
-        c.outputStream.use { it.write(body.toString().toByteArray()) }
-        val ok = c.responseCode in 200..299
-        val txt = (if (ok) c.inputStream else c.errorStream).bufferedReader().readText()
-        if (!ok) throw Exception("API ${c.responseCode}: ${txt.take(200)}")
-        return JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
-            .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-    }
-
-    private fun stopAll() {
-        active = false
-        rec?.cancel()
-        tts.stop()
-        mic.text = "Shuru"
-    }
-
-    override fun onDestroy() {
-        rec?.destroy()
-        tts.shutdown()
-        super.onDestroy()
+    override fun onPause() {
+        JarvisService.onLog = null
+        JarvisService.onStatus = null
+        super.onPause()
     }
 }
