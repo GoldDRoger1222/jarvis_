@@ -5,11 +5,15 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.SearchManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
@@ -21,15 +25,25 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.AlarmClock
 import android.provider.ContactsContract
+import android.provider.MediaStore
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.telephony.SmsManager
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
+import org.vosk.android.SpeechService
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -37,7 +51,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 import kotlin.concurrent.thread
+import org.vosk.android.RecognitionListener as VoskListener
 
 class JarvisService : Service() {
     companion object {
@@ -49,10 +65,12 @@ class JarvisService : Service() {
     }
 
     private val model = "gemini-3.5-flash-lite"
-    private val system = "You are Jarvis, a friendly voice assistant that can control an Android phone with tools. " +
+    private val baseSystem = "You are Jarvis, a friendly voice assistant that can control an Android phone with tools. " +
         "Reply in the same language the user speaks (Bangla or English). " +
         "Keep spoken replies short, 1 to 2 sentences. No markdown, no emojis, no lists. " +
-        "For web or YouTube searches prefer open_url, for example https://www.youtube.com/results?search_query=lofi or https://www.google.com/search?q=weather. " +
+        "For weather, news, sports scores, prices or any live or recent facts use web_search and include the place name in the query. " +
+        "To play a video use youtube_play. For songs and music use play_music, or youtube_play if the user says YouTube. " +
+        "For other web pages use open_url. " +
         "For tasks inside other apps: open_app, then read_screen to see what is there, then tap or type_text, and read_screen again to check. " +
         "Pass English app names to open_app. Never type passwords, OTPs, PINs or card numbers. " +
         "Sensitive actions such as calls, SMS and tapping send, pay or delete buttons ask the user for confirmation automatically, so just go ahead and call the tool. " +
@@ -63,7 +81,7 @@ class JarvisService : Service() {
         "delete", "remove", "submit", "post", "checkout", "uninstall", "reset", "erase", "call", "dial",
         "পাঠা", "কিন", "পেমেন্ট", "মুছ", "অর্ডার", "নিশ্চিত", "ফোন")
     private val yesWords = setOf("yes", "yeah", "yep", "ok", "okay", "sure", "confirm", "ha", "han", "haan",
-        "হ্যাঁ", "হ্যা", "হা", "করো", "করুন", "পাঠাও", "জি", "হ্যাঁ।")
+        "হ্যাঁ", "হ্যা", "হা", "করো", "করুন", "পাঠাও", "জি")
     private val noWords = setOf("no", "nope", "cancel", "na", "nah", "না", "থাক", "বাদ", "থামো", "stop")
 
     private val ui = Handler(Looper.getMainLooper())
@@ -76,17 +94,81 @@ class JarvisService : Service() {
     private var misses = 0
     private var errs = 0
     private var confirmQ: LinkedBlockingQueue<Boolean>? = null
+    private var bubble: TextView? = null
+    private var vosk: Model? = null
+    private var vs: SpeechService? = null
+    private var vr: Recognizer? = null
+    private var loading = false
+    private var triggered = false
 
     private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
     private fun lang() = prefs().getString("l", "bn-BD") ?: "bn-BD"
     private fun tr(bn: String, en: String) = if (lang() == "bn-BD") bn else en
     private fun ack() = tr("জি, বলুন", "Yes?")
 
-    private fun say(s: String) { statusText = s; onStatus?.invoke(s) }
+    private fun sys(): String {
+        val nick = prefs().getString("n", "")?.trim().orEmpty()
+        val per = prefs().getString("ps", "")?.trim().orEmpty()
+        var s = baseSystem
+        if (nick.isNotEmpty()) s += " Address the user as \"$nick\"."
+        if (per.isNotEmpty()) s += " Personality and style: $per."
+        return s
+    }
+
+    private fun say(s: String) {
+        statusText = s
+        onStatus?.invoke(s)
+        if (talking) showBubble(s)
+    }
+
     private fun addLog(who: String, t: String) {
         val l = "$who: $t\n\n"
         logBuf.append(l)
         onLog?.invoke(l)
+    }
+
+    // ---------- Bubble ----------
+
+    private fun showBubble(text: String) {
+        ui.post {
+            try {
+                if (!Settings.canDrawOverlays(this)) return@post
+                val wm = getSystemService(WindowManager::class.java)
+                if (bubble == null) {
+                    val tv = TextView(this)
+                    tv.setTextColor(Color.WHITE)
+                    tv.textSize = 14f
+                    tv.setPadding(36, 20, 36, 20)
+                    val bg = GradientDrawable()
+                    bg.setColor(0xDD202020.toInt())
+                    bg.cornerRadius = 60f
+                    tv.background = bg
+                    val lp = WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                        PixelFormat.TRANSLUCENT)
+                    lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                    lp.y = 120
+                    wm.addView(tv, lp)
+                    bubble = tv
+                }
+                bubble?.text = text
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    private fun hideBubble() {
+        ui.post {
+            try {
+                val b = bubble
+                if (b != null) getSystemService(WindowManager::class.java).removeView(b)
+            } catch (e: Exception) {
+            }
+            bubble = null
+        }
     }
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -128,12 +210,99 @@ class JarvisService : Service() {
         return START_NOT_STICKY
     }
 
+    // ---------- Wake word ----------
+
     private fun startWake() {
         if (talking) return
         waking = true
         errs = 0
-        say("Jarvis dak shunchi...")
-        listen()
+        if (prefs().getString("w", "v") == "v") startVosk()
+        else { say("Jarvis dak shunchi..."); listen() }
+    }
+
+    private fun download() {
+        val zip = File(cacheDir, "vosk.zip")
+        val c = URL("https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip")
+            .openConnection() as HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 60000
+        c.inputStream.use { i -> zip.outputStream().use { o -> i.copyTo(o) } }
+        val base = filesDir.canonicalPath
+        ZipInputStream(zip.inputStream()).use { z ->
+            var e = z.nextEntry
+            while (e != null) {
+                val f = File(filesDir, e.name)
+                if (!f.canonicalPath.startsWith(base)) throw Exception("bad zip")
+                if (e.isDirectory) f.mkdirs()
+                else {
+                    f.parentFile?.mkdirs()
+                    f.outputStream().use { o -> z.copyTo(o) }
+                }
+                e = z.nextEntry
+            }
+        }
+        zip.delete()
+        File(filesDir, "vosk-model-small-en-us-0.15/ok").createNewFile()
+    }
+
+    private fun startVosk() {
+        val m = vosk
+        if (m == null) {
+            if (loading) return
+            loading = true
+            say("Offline model ready hocche (prothom bar ~40MB download)...")
+            thread {
+                try {
+                    val dir = File(filesDir, "vosk-model-small-en-us-0.15")
+                    if (!File(dir, "ok").exists()) download()
+                    val loaded = Model(dir.absolutePath)
+                    ui.post { vosk = loaded; loading = false; if (waking) startVosk() }
+                } catch (e: Exception) {
+                    ui.post {
+                        loading = false
+                        say("Offline model error: ${e.message}. Wake button e Online koro")
+                    }
+                }
+            }
+            return
+        }
+        try {
+            stopVosk()
+            triggered = false
+            val r = Recognizer(m, 16000f, "[\"jarvis\", \"[unk]\"]")
+            val s = SpeechService(r, 16000f)
+            vr = r
+            vs = s
+            s.startListening(object : VoskListener {
+                override fun onPartialResult(h: String?) { heard(h) }
+                override fun onResult(h: String?) { heard(h) }
+                override fun onFinalResult(h: String?) {}
+                override fun onError(e: Exception?) { ui.post { say("Wake error: ${e?.message}") } }
+                override fun onTimeout() {}
+            })
+            say("Jarvis dak shunchi... (offline)")
+        } catch (e: Exception) {
+            say("Wake error: ${e.message}")
+        }
+    }
+
+    private fun heard(h: String?) {
+        if (triggered || h == null || !h.lowercase().contains("jarvis")) return
+        triggered = true
+        ui.post { stopVosk(); handleWake("jarvis") }
+    }
+
+    private fun stopVosk() {
+        try { vs?.stop(); vs?.shutdown() } catch (e: Exception) {}
+        try { vr?.close() } catch (e: Exception) {}
+        vs = null
+        vr = null
+    }
+
+    private fun applyVoice() {
+        tts.setLanguage(Locale.forLanguageTag(lang()))
+        tts.setSpeechRate(floatArrayOf(0.8f, 1.0f, 1.3f)[prefs().getInt("sr", 1).coerceIn(0, 2)])
+        tts.setPitch(floatArrayOf(0.8f, 1.0f, 1.2f)[prefs().getInt("pt", 1).coerceIn(0, 2)])
     }
 
     private fun handleWake(t: String) {
@@ -147,23 +316,25 @@ class JarvisService : Service() {
         if (at < 0) { ui.postDelayed({ listen() }, 200); return }
         val rest = l.substring(at + len).trim(' ', ',', '.', '!', '?', '।')
         ui.removeCallbacksAndMessages(null)
+        stopVosk()
         waking = false
         talking = true
         endAfter = false
         misses = 0
-        tts.setLanguage(Locale.forLanguageTag(lang()))
+        applyVoice()
         if (rest.length > 2) handle(rest) else { say("Haan bolo..."); speakOrListen(ack()) }
     }
 
     private fun onWake() {
         if (talking) return
         ui.removeCallbacksAndMessages(null)
+        stopVosk()
         rec?.cancel()
         waking = false
         talking = true
         endAfter = false
         misses = 0
-        tts.setLanguage(Locale.forLanguageTag(lang()))
+        applyVoice()
         say("Haan bolo...")
         speakOrListen(ack())
     }
@@ -283,6 +454,9 @@ class JarvisService : Service() {
 
     private val tools: JSONArray by lazy {
         JSONArray().put(JSONObject().put("functionDeclarations", JSONArray()
+            .put(fn("web_search", "Search the web for current information such as weather, news, scores, prices", "query" to "string"))
+            .put(fn("youtube_play", "Search YouTube and play the first video", "query" to "string"))
+            .put(fn("play_music", "Play a song, artist or playlist in the default music app", "query" to "string"))
             .put(fn("open_app", "Open an installed app by name", "app_name" to "string"))
             .put(fn("open_url", "Open a web link in the browser or matching app", "url" to "string"))
             .put(fn("set_alarm", "Set an alarm", "hour" to "integer", "minute" to "integer", "label" to "string"))
@@ -349,7 +523,11 @@ class JarvisService : Service() {
                 ui.post {
                     if (!talking) return@post
                     addLog("Jarvis", clean)
-                    if (clean.isEmpty()) listen() else { say("Bolchi..."); speakOrListen(clean) }
+                    if (clean.isEmpty()) listen() else {
+                        say("Bolchi...")
+                        showBubble(clean.take(140))
+                        speakOrListen(clean)
+                    }
                 }
             } catch (e: Exception) {
                 while (history.length() > mark) history.remove(history.length() - 1)
@@ -358,18 +536,7 @@ class JarvisService : Service() {
         }
     }
 
-    private fun callGemini(key: String): JSONObject {
-        for (i in 1..3) {
-            try { return geminiOnce(key) } catch (e: Exception) {
-                val m = e.message ?: ""
-                if (i == 3 || !(m.contains("503") || m.contains("timeout"))) throw e
-                Thread.sleep(2000)
-            }
-        }
-        throw Exception("Gemini error")
-    }
-
-    private fun geminiOnce(key: String): JSONObject {
+    private fun post(key: String, body: JSONObject): String {
         val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             .openConnection() as HttpURLConnection
         c.requestMethod = "POST"
@@ -378,20 +545,55 @@ class JarvisService : Service() {
         c.connectTimeout = 15000
         c.readTimeout = 60000
         c.doOutput = true
-        val now = SimpleDateFormat("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH).format(Date())
-        val body = JSONObject()
-            .put("system_instruction", JSONObject().put("parts",
-                JSONArray().put(JSONObject().put("text", "$system Current date and time: $now."))))
-            .put("contents", history)
-            .put("tools", tools)
         c.outputStream.use { it.write(body.toString().toByteArray()) }
         val ok = c.responseCode in 200..299
         val txt = (if (ok) c.inputStream else c.errorStream).bufferedReader().readText()
         if (!ok) throw Exception("API ${c.responseCode}: ${txt.take(200)}")
-        val content = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
-            .optJSONObject("content") ?: throw Exception("Empty reply from Gemini")
-        if (!content.has("role")) content.put("role", "model")
-        return content
+        return txt
+    }
+
+    private fun callGemini(key: String): JSONObject {
+        val now = SimpleDateFormat("EEEE d MMMM yyyy, HH:mm", Locale.ENGLISH).format(Date())
+        val body = JSONObject()
+            .put("system_instruction", JSONObject().put("parts",
+                JSONArray().put(JSONObject().put("text", "${sys()} Current date and time: $now."))))
+            .put("contents", history)
+            .put("tools", tools)
+        for (i in 1..3) {
+            try {
+                val txt = post(key, body)
+                val content = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
+                    .optJSONObject("content") ?: throw Exception("Empty reply from Gemini")
+                if (!content.has("role")) content.put("role", "model")
+                return content
+            } catch (e: Exception) {
+                val m = e.message ?: ""
+                if (i == 3 || !(m.contains("503") || m.contains("timeout"))) throw e
+                Thread.sleep(2000)
+            }
+        }
+        throw Exception("Gemini error")
+    }
+
+    private fun webSearch(q: String): String {
+        val key = prefs().getString("k", "")?.trim() ?: ""
+        val body = JSONObject()
+            .put("contents", JSONArray().put(msg("user", "$q\nAnswer briefly and factually using current information.")))
+            .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+        var last: Exception? = null
+        for (i in 1..2) {
+            try {
+                val parts = JSONObject(post(key, body)).getJSONArray("candidates").getJSONObject(0)
+                    .getJSONObject("content").getJSONArray("parts")
+                val sb = StringBuilder()
+                for (j in 0 until parts.length()) sb.append(parts.getJSONObject(j).optString("text"))
+                return sb.toString().take(1500)
+            } catch (e: Exception) {
+                last = e
+                Thread.sleep(1500)
+            }
+        }
+        return "Search failed: ${last?.message}"
     }
 
     // ---------- Tools ----------
@@ -404,6 +606,18 @@ class JarvisService : Service() {
 
     private fun runTool(name: String, a: JSONObject): String {
         return when (name) {
+            "web_search" -> webSearch(a.optString("query"))
+            "youtube_play" -> {
+                val u = "https://www.youtube.com/results?search_query=" + Uri.encode(a.optString("query"))
+                if (!launch(Intent(Intent.ACTION_VIEW, Uri.parse(u)))) "Could not open YouTube"
+                else { Thread.sleep(4000); tapFirstVideo() }
+            }
+            "play_music" -> {
+                val i = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH)
+                    .putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
+                    .putExtra(SearchManager.QUERY, a.optString("query"))
+                if (launch(i)) "Asked the music app to play ${a.optString("query")}" else "No music app could handle that"
+            }
             "open_app" -> { val r = openApp(a.optString("app_name")); Thread.sleep(2000); r }
             "open_url" -> {
                 var u = a.optString("url")
@@ -449,6 +663,26 @@ class JarvisService : Service() {
             "read_screen", "tap", "type_text", "scroll", "press_key" -> uiTool(name, a)
             else -> "Unknown tool"
         }
+    }
+
+    private fun tapFirstVideo(): String {
+        val s = JarvisAccess.inst ?: return "Accessibility is off, so I could not tap the video"
+        fun find(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (n == null) return null
+            val d = n.contentDescription?.toString()?.lowercase() ?: ""
+            if (n.isClickable && d.contains("play video")) return n
+            for (i in 0 until n.childCount) {
+                val r = find(n.getChild(i))
+                if (r != null) return r
+            }
+            return null
+        }
+        for (k in 1..4) {
+            val n = find(s.rootInActiveWindow)
+            if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return "Playing the first video"
+            Thread.sleep(1500)
+        }
+        return "Could not find a video to tap. Use read_screen and tap instead."
     }
 
     private fun openApp(name: String): String {
@@ -530,6 +764,7 @@ class JarvisService : Service() {
         talking = false
         endAfter = false
         confirmQ?.offer(false)
+        hideBubble()
         val r = rec
         rec = null
         ui.post { r?.cancel(); r?.destroy() }
@@ -543,6 +778,9 @@ class JarvisService : Service() {
         waking = false
         confirmQ?.offer(false)
         ui.removeCallbacksAndMessages(null)
+        hideBubble()
+        stopVosk()
+        try { vosk?.close() } catch (e: Exception) {}
         rec?.destroy()
         tts.shutdown()
         say("Jarvis bondho")
