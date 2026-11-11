@@ -68,7 +68,9 @@ class JarvisService : Service() {
     private val baseSystem = "You are Jarvis, a friendly voice assistant that can control an Android phone with tools. " +
         "Reply in the same language the user speaks (Bangla or English). " +
         "Keep spoken replies short, 1 to 2 sentences. No markdown, no emojis, no lists. " +
-        "For weather, news, sports scores, prices or any live or recent facts use web_search and include the place name in the query. " +
+        "For weather use get_weather with the city name and describe the WMO weather code in plain words. " +
+        "For news use get_news and include the country or place in the topic. " +
+        "For other live or recent facts use web_search. " +
         "To play a video use youtube_play. For songs and music use play_music, or youtube_play if the user says YouTube. " +
         "For other web pages use open_url. " +
         "For tasks inside other apps: open_app, then read_screen to see what is there, then tap or type_text, and read_screen again to check. " +
@@ -454,7 +456,9 @@ class JarvisService : Service() {
 
     private val tools: JSONArray by lazy {
         JSONArray().put(JSONObject().put("functionDeclarations", JSONArray()
-            .put(fn("web_search", "Search the web for current information such as weather, news, scores, prices", "query" to "string"))
+            .put(fn("get_weather", "Get current weather and today's forecast for a city", "city" to "string"))
+            .put(fn("get_news", "Get the latest news headlines about a topic", "topic" to "string"))
+            .put(fn("web_search", "Search the web for other current information such as scores or prices", "query" to "string"))
             .put(fn("youtube_play", "Search YouTube and play the first video", "query" to "string"))
             .put(fn("play_music", "Play a song, artist or playlist in the default music app", "query" to "string"))
             .put(fn("open_app", "Open an installed app by name", "app_name" to "string"))
@@ -596,6 +600,47 @@ class JarvisService : Service() {
         return "Search failed: ${last?.message}"
     }
 
+    private fun httpGet(u: String): String {
+        val c = URL(u).openConnection() as HttpURLConnection
+        c.connectTimeout = 15000
+        c.readTimeout = 20000
+        c.setRequestProperty("User-Agent", "Mozilla/5.0")
+        return c.inputStream.bufferedReader().readText()
+    }
+
+    private fun getWeather(city: String): String {
+        val g = JSONObject(httpGet("https://geocoding-api.open-meteo.com/v1/search?count=1&name=" + Uri.encode(city)))
+            .optJSONArray("results") ?: return "City not found: $city"
+        val p = g.getJSONObject(0)
+        val url = "https://api.open-meteo.com/v1/forecast?latitude=${p.getDouble("latitude")}" +
+            "&longitude=${p.getDouble("longitude")}" +
+            "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m" +
+            "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
+            "&timezone=auto&forecast_days=1"
+        val j = JSONObject(httpGet(url))
+        val cur = j.getJSONObject("current")
+        val d = j.getJSONObject("daily")
+        return "Weather in ${p.optString("name")}: now ${cur.getDouble("temperature_2m")} C, " +
+            "feels like ${cur.getDouble("apparent_temperature")} C, " +
+            "humidity ${cur.getInt("relative_humidity_2m")} percent, " +
+            "wind ${cur.getDouble("wind_speed_10m")} km/h, WMO weather code ${cur.getInt("weather_code")}. " +
+            "Today high ${d.getJSONArray("temperature_2m_max").getDouble(0)} C, " +
+            "low ${d.getJSONArray("temperature_2m_min").getDouble(0)} C, " +
+            "rain chance ${d.getJSONArray("precipitation_probability_max").optInt(0)} percent."
+    }
+
+    private fun getNews(topic: String): String {
+        val q = if (topic.isBlank()) "top stories" else topic
+        val xml = httpGet("https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=" + Uri.encode(q))
+        val rx = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL)
+        val items = xml.split("<item>").drop(1).take(6).mapNotNull { rx.find(it)?.groupValues?.get(1) }
+        if (items.isEmpty()) return "No news found for $q"
+        return items.joinToString("\n") {
+            it.replace("<![CDATA[", "").replace("]]>", "")
+                .replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'")
+        }
+    }
+
     // ---------- Tools ----------
 
     private fun launch(i: Intent): Boolean {
@@ -606,6 +651,8 @@ class JarvisService : Service() {
 
     private fun runTool(name: String, a: JSONObject): String {
         return when (name) {
+            "get_weather" -> getWeather(a.optString("city"))
+            "get_news" -> getNews(a.optString("topic"))
             "web_search" -> webSearch(a.optString("query"))
             "youtube_play" -> {
                 val u = "https://www.youtube.com/results?search_query=" + Uri.encode(a.optString("query"))
