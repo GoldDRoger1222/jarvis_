@@ -114,6 +114,7 @@ class JarvisService : Service() {
         var s = baseSystem
         if (nick.isNotEmpty()) s += " Address the user as \"$nick\"."
         if (per.isNotEmpty()) s += " Personality and style: $per."
+        s += JarvisMemory.prompt(this)
         return s
     }
 
@@ -457,6 +458,9 @@ class JarvisService : Service() {
     private val tools: JSONArray by lazy {
         JSONArray().put(JSONObject().put("functionDeclarations", JSONArray()
             .put(fn("get_weather", "Get current weather and today's forecast for a city", "city" to "string"))
+            .put(fn("remember", "Save a short fact about the user to long-term memory", "fact" to "string"))
+            .put(fn("forget", "Forget saved memories that contain a keyword, or all of them", "keyword" to "string"))
+            .put(fn("list_memories", "List everything saved in long-term memory"))
             .put(fn("get_news", "Get the latest news headlines about a topic", "topic" to "string"))
             .put(fn("web_search", "Search the web for other current information such as scores or prices", "query" to "string"))
             .put(fn("youtube_play", "Search YouTube and play the first video", "query" to "string"))
@@ -652,6 +656,9 @@ class JarvisService : Service() {
     private fun runTool(name: String, a: JSONObject): String {
         return when (name) {
             "get_weather" -> getWeather(a.optString("city"))
+            "remember" -> JarvisMemory.add(this, a.optString("fact"))
+            "forget" -> JarvisMemory.forget(this, a.optString("keyword"))
+            "list_memories" -> JarvisMemory.list(this).let { if (it.isEmpty()) "Nothing saved yet" else it.joinToString("\n") }
             "get_news" -> getNews(a.optString("topic"))
             "web_search" -> webSearch(a.optString("query"))
             "youtube_play" -> {
