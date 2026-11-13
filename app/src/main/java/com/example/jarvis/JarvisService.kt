@@ -35,6 +35,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.telecom.TelecomManager
 import android.telephony.SmsManager
 import android.util.Base64
 import android.view.Gravity
@@ -71,22 +72,31 @@ class JarvisService : Service() {
         var onStatus: ((String) -> Unit)? = null
     }
 
-    private val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
-    private var mi = 0
+    private val smart = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+    private val fast = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+    private val cool = HashMap<String, Long>()
+    private val dead = HashSet<String>()
+
     private val baseSystem = "You are Jarvis, a friendly voice assistant that can control an Android phone with tools. " +
         "Reply in the same language the user speaks (Bangla or English). " +
         "Keep spoken replies short, 1 to 2 sentences. No markdown, no emojis, no lists. " +
-        "Be efficient: use as few tool calls as possible and never call read_screen twice in a row. " +
+        "Think before acting and plan multi-step tasks. Use as few tool calls as possible. " +
+        "If the person, contact, item or detail the user wants is missing or unclear (for example 'message someone'), ask one short question instead of guessing. " +
+        "To phone someone always use make_call. Never open Viber, WhatsApp or other calling apps for a call unless the user names that app. " +
+        "To send a WhatsApp message use whatsapp_message. To send an SMS use send_sms. " +
         "For weather use get_weather with the city name and describe the WMO weather code in plain words. " +
         "For news use get_news and include the country or place in the topic. " +
         "For other live or recent facts use web_search. " +
-        "To send a WhatsApp message always use whatsapp_message. " +
         "To play a video use youtube_play. For songs and music use play_music, or youtube_play if the user says YouTube. " +
         "For other web pages use open_url. " +
-        "For tasks inside other apps: open_app, then read_screen to see what is there, then tap or type_text, and read_screen again to check. " +
+        "For tasks inside other apps follow this loop: open_app (it returns the screen), then act with tap_index (preferred), tap, type_text, scroll or press_key. " +
+        "Every one of those returns the new screen, so do not call read_screen unless the screen is missing. " +
+        "Screen elements are numbered like [3]; use those numbers with tap_index. Tap an input field before type_text. " +
+        "To message someone inside an app: find the search or new message option, type the name, tap the matching person, type the message, then tap Send (the user is asked to confirm). " +
+        "Stop after 3 failed attempts and tell the user what you can see. " +
         "Pass English app names to open_app. Never type passwords, OTPs, PINs or card numbers. " +
         "Speech recognition can mishear words, so if a request looks odd, guess the most likely meaning from context. " +
-        "Sensitive actions such as calls, SMS and tapping send, pay or delete buttons ask the user for confirmation automatically, so just go ahead and call the tool. " +
+        "Sensitive actions such as calls, SMS and tapping send, pay or delete buttons ask the user for confirmation automatically, so just call the tool. " +
         "If the user declines, stop and say so. When the task is done, say so briefly."
     private val wakeWords = listOf("jarvis", "jarvice", "jervis", "javis",
         "জার্ভিস", "জারভিস", "জার্বিস", "জারবিস")
@@ -109,6 +119,7 @@ class JarvisService : Service() {
     private var waking = false
     @Volatile private var talking = false
     @Volatile private var enrolling = false
+    @Volatile private var trusted = false
     @Volatile private var capGen = 0
     private var endAfter = false
     private var misses = 0
@@ -144,7 +155,8 @@ class JarvisService : Service() {
         val per = prefs().getString("ps", "")?.trim().orEmpty()
         var s = baseSystem
         if (nick.isNotEmpty()) s += " Address the user as \"$nick\"."
-        if (per.isNotEmpty()) s += " Personality and style: $per."
+        s += if (per.isNotEmpty()) " Personality and style: $per."
+        else " Personality: calm, witty and loyal like Tony Stark's JARVIS. Brief, clever, a touch of dry humour, never rambling. Anticipate what the user needs next."
         if (contactNames.isNotEmpty())
             s += " The user's contacts are: " + contactNames.take(150).joinToString("; ") +
                 ". When using a contact in a tool, write the name exactly as in this list."
@@ -198,15 +210,15 @@ class JarvisService : Service() {
     }
 
     private fun threshold(): Double {
-        val base = prefs().getFloat("vt", 0.45f).toDouble()
+        val base = maxOf(prefs().getFloat("vt", 0.45f).toDouble(), 0.50)
         val delta = (1 - prefs().getInt("vs", 1)) * 0.07
         return (base + delta).coerceIn(0.2, 0.8)
     }
 
     private fun cmdThreshold(): Double {
-        val base = prefs().getFloat("vct", 0.42f).toDouble()
+        val base = maxOf(prefs().getFloat("vct", 0.42f).toDouble(), 0.48)
         val delta = (1 - prefs().getInt("vs", 1)) * 0.06
-        return (base + delta).coerceIn(0.2, 0.7)
+        return (base + delta).coerceIn(0.2, 0.75)
     }
 
     private fun norm(v: DoubleArray): DoubleArray {
@@ -258,7 +270,7 @@ class JarvisService : Service() {
         var mx = 0.0
         for (s in samples) mx = maxOf(mx, cosDist(s, mean))
         tmpWake = mean
-        tmpWakeThr = (mx + 0.12).coerceIn(0.35, 0.60)
+        tmpWakeThr = (mx + 0.15).coerceIn(0.40, 0.65)
         samples.clear()
         stopVosk()
         startCmdEnroll()
@@ -290,7 +302,7 @@ class JarvisService : Service() {
         val mean = meanOf(vecs)
         var mx = 0.0
         for (s in vecs) mx = maxOf(mx, cosDist(s, mean))
-        val thr = (mx + 0.10).coerceIn(0.30, 0.55)
+        val thr = (mx + 0.15).coerceIn(0.40, 0.65)
         val w = tmpWake
         if (w == null) { enrolling = false; return }
         prefs().edit()
@@ -389,10 +401,7 @@ class JarvisService : Service() {
         running = true
         loadContactNames()
         when (intent?.action) {
-            "TALK" -> {
-                if (lockOn()) loadModels { }
-                onWake()
-            }
+            "TALK" -> onWake()
             "ENROLL" -> startEnroll()
             else -> startWake()
         }
@@ -567,6 +576,7 @@ class JarvisService : Service() {
         stopVosk()
         waking = false
         talking = true
+        trusted = false
         endAfter = false
         misses = 0
         rejects = 0
@@ -585,6 +595,7 @@ class JarvisService : Service() {
         enrolling = false
         waking = false
         talking = true
+        trusted = true
         endAfter = false
         misses = 0
         rejects = 0
@@ -796,7 +807,7 @@ class JarvisService : Service() {
             .put(JSONObject().put("inline_data", JSONObject().put("mime_type", "audio/wav").put("data", b64)))
         val body = JSONObject().put("contents",
             JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
-        val j = JSONObject(postRetry(key, body))
+        val j = JSONObject(call(key, body, fast))
         val ps = j.getJSONArray("candidates").getJSONObject(0).optJSONObject("content")
             ?.optJSONArray("parts") ?: return ""
         val sb = StringBuilder()
@@ -808,9 +819,26 @@ class JarvisService : Service() {
         return if (t.equals("NOTHING", true)) "" else t
     }
 
+    private fun sendAudio(pcm: ShortArray, g: Int, key: String, note: String?) {
+        val text = try { transcribe(pcm, key) } catch (e: Exception) { fail(e); return }
+        ui.post {
+            if (g != capGen || !talking) return@post
+            rejects = 0
+            if (note != null) addLog("Lock", note)
+            if (text.isBlank()) miss() else joinOrHandle(text)
+        }
+    }
+
     private fun onAudio(pcm: ShortArray?, g: Int) {
         if (!talking || g != capGen) return
         if (pcm == null || pcm.size < 8000) { miss(); return }
+        val key = prefs().getString("k", "")?.trim() ?: ""
+        if (trusted) {
+            misses = 0
+            say("Bujhchi...")
+            thread { sendAudio(pcm, g, key, null) }
+            return
+        }
         if (vosk == null || spk == null) {
             if (loading) {
                 say("Voice model ready hocche, ektu opekkha...")
@@ -823,7 +851,6 @@ class JarvisService : Service() {
         }
         misses = 0
         say("Voice check korchi...")
-        val key = prefs().getString("k", "")?.trim() ?: ""
         thread {
             val v = try { embed(pcm) } catch (e: Exception) { null }
             val saved = loadPrint("vc")
@@ -837,7 +864,7 @@ class JarvisService : Service() {
             }
             val d = cosDist(v, saved)
             val secs = pcm.size / 16000.0
-            val thr = cmdThreshold() + (if (secs < 1.5) 0.10 else 0.0)
+            val thr = cmdThreshold() + (if (secs < 1.5) 0.12 else 0.0)
             if (d > thr) {
                 ui.post {
                     if (g != capGen || !talking) return@post
@@ -848,16 +875,7 @@ class JarvisService : Service() {
                 }
                 return@thread
             }
-            val text = try { transcribe(pcm, key) } catch (e: Exception) {
-                fail(e)
-                return@thread
-            }
-            ui.post {
-                if (g != capGen || !talking) return@post
-                rejects = 0
-                addLog("Lock", "Voice mile geche (${fmt(d)} <= ${fmt(thr)})")
-                if (text.isBlank()) miss() else joinOrHandle(text)
-            }
+            sendAudio(pcm, g, key, "Voice mile geche (${fmt(d)} <= ${fmt(thr)})")
         }
     }
 
@@ -949,20 +967,21 @@ class JarvisService : Service() {
             .put(fn("web_search", "Search the web for other current information such as scores or prices", "query" to "string"))
             .put(fn("youtube_play", "Search YouTube and play the first video", "query" to "string"))
             .put(fn("play_music", "Play a song, artist or playlist in the default music app", "query" to "string"))
-            .put(fn("open_app", "Open an installed app by name", "app_name" to "string"))
+            .put(fn("open_app", "Open an installed app by name. Returns the screen", "app_name" to "string"))
             .put(fn("open_url", "Open a web link in the browser or matching app", "url" to "string"))
             .put(fn("set_alarm", "Set an alarm", "hour" to "integer", "minute" to "integer", "label" to "string"))
             .put(fn("set_timer", "Start a countdown timer", "seconds" to "integer", "label" to "string"))
-            .put(fn("make_call", "Call a contact name or phone number", "who" to "string"))
+            .put(fn("make_call", "Phone a contact name or number with the normal phone app", "who" to "string"))
             .put(fn("send_sms", "Send an SMS to a contact name or number", "to" to "string", "message" to "string"))
             .put(fn("flashlight", "Turn the flashlight on or off", "on" to "boolean"))
             .put(fn("set_volume", "Set media volume 0 to 100 percent", "percent" to "integer"))
             .put(fn("media_control", "Control media playback: play_pause, next or previous", "action" to "string"))
-            .put(fn("read_screen", "Read the text currently visible on the phone screen"))
-            .put(fn("tap", "Tap a button or item on screen by its visible text", "text" to "string"))
-            .put(fn("type_text", "Type text into the focused input field", "text" to "string"))
-            .put(fn("scroll", "Scroll the screen, direction is up or down", "direction" to "string"))
-            .put(fn("press_key", "Press a system key: back, home or recents", "key" to "string"))
+            .put(fn("read_screen", "Read the numbered elements on the phone screen"))
+            .put(fn("tap_index", "Tap a numbered screen element, for example 3 for [3]", "index" to "integer"))
+            .put(fn("tap", "Tap a button or item on screen by its visible text. Returns the new screen", "text" to "string"))
+            .put(fn("type_text", "Type text into the focused input field. Returns the new screen", "text" to "string"))
+            .put(fn("scroll", "Scroll the screen, direction is up or down. Returns the new screen", "direction" to "string"))
+            .put(fn("press_key", "Press a system key: back, home or recents. Returns the new screen", "key" to "string"))
         ))
     }
 
@@ -976,8 +995,21 @@ class JarvisService : Service() {
         }
     }
 
+    private fun compact(upTo: Int) {
+        val n = minOf(upTo, history.length())
+        for (i in 0 until n) {
+            val ps = history.getJSONObject(i).optJSONArray("parts") ?: continue
+            for (j in 0 until ps.length()) {
+                val resp = ps.getJSONObject(j).optJSONObject("functionResponse")?.optJSONObject("response") ?: continue
+                val res = resp.optString("result")
+                if (res.length > 300) resp.put("result", res.take(300) + "...")
+            }
+        }
+    }
+
     private fun ask(text: String) {
         trimHistory()
+        compact(history.length())
         val mark = history.length()
         history.put(msg("user", text))
         say("Bhabchi...")
@@ -986,7 +1018,8 @@ class JarvisService : Service() {
             try {
                 var reply = ""
                 var finished = false
-                for (step in 1..12) {
+                for (step in 1..16) {
+                    compact(history.length() - 1)
                     val content = callGemini(key)
                     history.put(content)
                     val parts = content.optJSONArray("parts") ?: JSONArray()
@@ -1031,14 +1064,14 @@ class JarvisService : Service() {
         }
     }
 
-    private fun post(key: String, body: JSONObject): String {
-        val c = URL("https://generativelanguage.googleapis.com/v1beta/models/${models[mi]}:generateContent")
+    private fun postTo(modelName: String, key: String, body: JSONObject, readMs: Int): String {
+        val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent")
             .openConnection() as HttpURLConnection
         c.requestMethod = "POST"
         c.setRequestProperty("Content-Type", "application/json")
         c.setRequestProperty("x-goog-api-key", key)
         c.connectTimeout = 15000
-        c.readTimeout = 60000
+        c.readTimeout = readMs
         c.doOutput = true
         c.outputStream.use { it.write(body.toString().toByteArray()) }
         val ok = c.responseCode in 200..299
@@ -1047,28 +1080,34 @@ class JarvisService : Service() {
         return txt
     }
 
-    private fun postRetry(key: String, body: JSONObject): String {
-        for (i in 1..4) {
-            try {
-                return post(key, body)
-            } catch (e: Exception) {
-                val m = e.message ?: ""
-                if (m.contains("API 429")) {
-                    if (m.contains("PerDay")) {
-                        if (mi < models.size - 1) { mi++; continue }
-                        throw e
-                    }
-                    if (i == 4) throw e
-                    val w = Regex("\"retryDelay\":\\s*\"(\\d+)").find(m)?.groupValues?.get(1)?.toLongOrNull() ?: 15L
-                    ui.post { say("Limit: ${w}s opekkha korchi...") }
-                    Thread.sleep(minOf(w, 40L) * 1000)
-                    continue
+    private fun call(key: String, body: JSONObject, ladder: List<String>): String {
+        var last: Exception? = null
+        for (round in 1..2) {
+            val now = System.currentTimeMillis()
+            for ((k, name) in ladder.withIndex()) {
+                if (name in dead) continue
+                if ((cool[name] ?: 0L) > now && k < ladder.size - 1) continue
+                try {
+                    return postTo(name, key, body, if (k == 0 && ladder === smart) 35000 else 60000)
+                } catch (e: Exception) {
+                    last = e
+                    val m = (e.message ?: "")
+                    val t = System.currentTimeMillis()
+                    if (m.contains("API 404")) dead.add(name)
+                    else if (m.contains("API 429")) cool[name] = t + (if (m.contains("PerDay")) 3600000L else 60000L)
+                    else if (m.contains("API 503") || e is java.net.SocketTimeoutException || m.lowercase().contains("timeout"))
+                        cool[name] = t + 300000L
+                    else throw e
                 }
-                if (i == 4 || !(m.contains("503") || m.contains("timeout"))) throw e
-                Thread.sleep(2000)
+            }
+            if (round == 1) {
+                val w = Regex("\"retryDelay\":\\s*\"(\\d+)").find(last?.message ?: "")?.groupValues?.get(1)?.toLongOrNull() ?: 8L
+                ui.post { say("Gemini busy, ${minOf(w, 20L)}s opekkha korchi...") }
+                Thread.sleep(minOf(w, 20L) * 1000)
+                cool.clear()
             }
         }
-        throw Exception("Gemini error")
+        throw last ?: Exception("Gemini error")
     }
 
     private fun callGemini(key: String): JSONObject {
@@ -1078,7 +1117,7 @@ class JarvisService : Service() {
                 JSONArray().put(JSONObject().put("text", "${sys()} Current date and time: $now."))))
             .put("contents", history)
             .put("tools", tools)
-        val txt = postRetry(key, body)
+        val txt = call(key, body, smart)
         val content = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
             .optJSONObject("content") ?: throw Exception("Empty reply from Gemini")
         if (!content.has("role")) content.put("role", "model")
@@ -1090,20 +1129,15 @@ class JarvisService : Service() {
         val body = JSONObject()
             .put("contents", JSONArray().put(msg("user", "$q\nAnswer briefly and factually using current information.")))
             .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
-        var last: Exception? = null
-        for (i in 1..2) {
-            try {
-                val parts = JSONObject(post(key, body)).getJSONArray("candidates").getJSONObject(0)
-                    .getJSONObject("content").getJSONArray("parts")
-                val sb = StringBuilder()
-                for (j in 0 until parts.length()) sb.append(parts.getJSONObject(j).optString("text"))
-                return sb.toString().take(1500)
-            } catch (e: Exception) {
-                last = e
-                Thread.sleep(1500)
-            }
+        return try {
+            val parts = JSONObject(call(key, body, fast)).getJSONArray("candidates").getJSONObject(0)
+                .getJSONObject("content").getJSONArray("parts")
+            val sb = StringBuilder()
+            for (j in 0 until parts.length()) sb.append(parts.getJSONObject(j).optString("text"))
+            sb.toString().take(1500)
+        } catch (e: Exception) {
+            "Search failed: ${e.message?.take(200)}"
         }
-        return "Search failed: ${last?.message?.take(200)}"
     }
 
     private fun httpGet(u: String): String {
@@ -1155,6 +1189,11 @@ class JarvisService : Service() {
         return try { ctx.startActivity(i); true } catch (e: Exception) { false }
     }
 
+    private fun screenNow(): String {
+        val s = JarvisAccess.inst ?: return ""
+        return "\n\nSCREEN NOW:\n" + s.readScreen()
+    }
+
     private fun runTool(name: String, a: JSONObject): String {
         return when (name) {
             "whatsapp_message" -> whatsappMessage(a.optString("to"), a.optString("message"))
@@ -1175,7 +1214,11 @@ class JarvisService : Service() {
                     .putExtra(SearchManager.QUERY, a.optString("query"))
                 if (launch(i)) "Asked the music app to play ${a.optString("query")}" else "No music app could handle that"
             }
-            "open_app" -> { val r = openApp(a.optString("app_name")); Thread.sleep(2000); r }
+            "open_app" -> {
+                val r = openApp(a.optString("app_name"))
+                Thread.sleep(2200)
+                if (r.startsWith("Opened")) r + screenNow() else r
+            }
             "open_url" -> {
                 var u = a.optString("url")
                 if (!u.startsWith("http")) u = "https://$u"
@@ -1217,7 +1260,7 @@ class JarvisService : Service() {
                 am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
                 "Done"
             }
-            "read_screen", "tap", "type_text", "scroll", "press_key" -> uiTool(name, a)
+            "read_screen", "tap_index", "tap", "type_text", "scroll", "press_key" -> uiTool(name, a)
             else -> "Unknown tool"
         }
     }
@@ -1239,7 +1282,7 @@ class JarvisService : Service() {
             if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return "Playing the first video"
             Thread.sleep(1500)
         }
-        return "Could not find a video to tap. Use read_screen and tap instead."
+        return "Could not find a video to tap. Use read_screen and tap_index instead."
     }
 
     private fun tapDesc(label: String): Boolean {
@@ -1318,12 +1361,28 @@ class JarvisService : Service() {
         return if (bs >= 0.5) best else null
     }
 
+    private fun placeCall(num: String): Boolean {
+        return try {
+            val tm = getSystemService(TelecomManager::class.java)
+            val uri = Uri.fromParts("tel", num, null)
+            if (checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
+                tm.placeCall(uri, Bundle())
+                true
+            } else {
+                val i = Intent(Intent.ACTION_DIAL, uri)
+                val pk = tm.defaultDialerPackage
+                if (pk != null) i.setPackage(pk)
+                launch(i)
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun makeCall(who: String): String {
         val c = findContact(who) ?: return "No contact found for $who (contacts permission may be missing)"
         if (!confirm(tr("${c.first} কে ফোন করব?", "Call ${c.first}?"))) return "User declined"
-        val ok = checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
-        val i = Intent(if (ok) Intent.ACTION_CALL else Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(c.second)))
-        return if (launch(i)) "Calling ${c.first}" else "Could not start the call"
+        return if (placeCall(c.second)) "Calling ${c.first} with the phone app" else "Could not start the call"
     }
 
     private fun sendSms(to: String, body: String): String {
@@ -1365,32 +1424,39 @@ class JarvisService : Service() {
     private fun uiTool(name: String, a: JSONObject): String {
         val s = JarvisAccess.inst
             ?: return "Accessibility service is off. Ask the user to turn on Jarvis in Accessibility settings."
-        return when (name) {
-            "read_screen" -> s.readScreen()
+        var act = true
+        val r: String = when (name) {
+            "read_screen" -> { act = false; s.readScreen() }
+            "tap_index" -> {
+                val i = a.optInt("index")
+                val lab = s.labelOf(i)
+                if (sensitive.any { lab.lowercase().contains(it) } &&
+                    !confirm(tr("'$lab' চাপব? নিশ্চিত?", "Tap '$lab'? Are you sure?"))) return "User declined"
+                s.tapIndex(i)
+            }
             "tap" -> {
                 val t = a.optString("text")
                 val l = t.lowercase()
                 if (sensitive.any { l.contains(it) } &&
                     !confirm(tr("'$t' চাপব? নিশ্চিত?", "Tap '$t'? Are you sure?"))) return "User declined"
-                val r = s.tap(t)
-                Thread.sleep(1200)
-                r
+                s.tap(t)
             }
             "type_text" -> {
                 val t = a.optString("text")
-                val screen = s.readScreen().lowercase()
+                val screen = s.readScreen(false).lowercase()
                 if (riskyRx.containsMatchIn(screen)) {
                     val numeric = t.count { it.isDigit() } >= 4 && t.all { it.isDigit() || it in " -+" }
                     if (numeric) return "Refused: I do not type numbers or codes on payment or login screens"
                     if (!confirm(tr("এখানে '$t' লিখব?", "Type '$t' here?"))) return "User declined"
                 }
-                val r = s.typeText(t)
-                Thread.sleep(400)
-                r
+                s.typeText(t)
             }
-            "scroll" -> { val r = s.scroll(a.optString("direction") != "up"); Thread.sleep(600); r }
+            "scroll" -> s.scroll(a.optString("direction") != "up")
             else -> s.key(a.optString("key"))
         }
+        if (!act) return r
+        Thread.sleep(1300)
+        return r + "\n\nSCREEN NOW:\n" + s.readScreen()
     }
 
     // ---------- End ----------
@@ -1398,6 +1464,7 @@ class JarvisService : Service() {
     private fun endTalk() {
         capGen++
         talking = false
+        trusted = false
         endAfter = false
         carry = ""
         carryN = 0
