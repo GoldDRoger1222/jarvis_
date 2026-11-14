@@ -22,19 +22,21 @@ class HologramActivity : Activity() {
     private lateinit var holo: HoloView
     private lateinit var status: TextView
     private lateinit var input: EditText
-    private lateinit var top: LinearLayout
-    private lateinit var bottom: LinearLayout
+    private lateinit var topBar: LinearLayout
+    private lateinit var bottomBar: LinearLayout
     private lateinit var pyrBtn: Button
     private lateinit var spinBtn: Button
     private var lastJson = ""
     private var gen = 0
     private var chrome = true
 
-    private fun mk(label: String, f: () -> Unit) = Button(this).apply {
-        text = label
-        textSize = 12f
-        isAllCaps = false
-        setOnClickListener { f() }
+    private fun mk(label: String, f: () -> Unit): Button {
+        val b = Button(this)
+        b.text = label
+        b.textSize = 12f
+        b.isAllCaps = false
+        b.setOnClickListener { f() }
+        return b
     }
 
     override fun onCreate(b: Bundle?) {
@@ -49,30 +51,29 @@ class HologramActivity : Activity() {
         holo = HoloView(this)
         holo.onTap = { toggleChrome() }
 
-        status = TextView(this).apply {
-            setTextColor(Color.rgb(0, 229, 255))
-            textSize = 14f
-            text = "Jarvis Hologram"
-        }
-        input = EditText(this).apply {
-            hint = "Ki banabo? (jemon: rocket engine, ironman helmet)"
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            setSingleLine(true)
-        }
+        status = TextView(this)
+        status.setTextColor(Color.rgb(0, 229, 255))
+        status.textSize = 14f
+        status.text = "Jarvis Hologram"
+
+        input = EditText(this)
+        input.hint = "Ki banabo? (jemon: rocket engine, ironman helmet)"
+        input.setTextColor(Color.WHITE)
+        input.setHintTextColor(Color.GRAY)
+        input.setSingleLine(true)
+
         val go = mk("Banao") { build(input.text.toString(), false) }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(input, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(go)
-        }
-        top = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
-            setPadding(pad, pad, pad, pad)
-            addView(status)
-            addView(row)
-        }
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(go)
+
+        topBar = LinearLayout(this)
+        topBar.orientation = LinearLayout.VERTICAL
+        topBar.setBackgroundColor(Color.argb(150, 0, 0, 0))
+        topBar.setPadding(pad, pad, pad, pad)
+        topBar.addView(status)
+        topBar.addView(row)
 
         pyrBtn = mk("Pyramid: OFF") {
             holo.pyramid = !holo.pyramid
@@ -86,18 +87,18 @@ class HologramActivity : Activity() {
         }
         val editBtn = mk("Bodlao") { build(input.text.toString(), true) }
         val closeBtn = mk("X") { finish() }
-        bottom = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
-            for (v in listOf(pyrBtn, flipBtn, spinBtn, editBtn, closeBtn))
-                addView(v, LinearLayout.LayoutParams(0, -2, 1f))
-        }
+
+        bottomBar = LinearLayout(this)
+        bottomBar.orientation = LinearLayout.HORIZONTAL
+        bottomBar.setBackgroundColor(Color.argb(150, 0, 0, 0))
+        for (v in listOf(pyrBtn, flipBtn, spinBtn, editBtn, closeBtn))
+            bottomBar.addView(v, LinearLayout.LayoutParams(0, -2, 1f))
 
         val root = FrameLayout(this)
         root.setBackgroundColor(Color.BLACK)
         root.addView(holo, FrameLayout.LayoutParams(-1, -1))
-        root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-        root.addView(bottom, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        root.addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        root.addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         setContentView(root)
 
         val saved = getSharedPreferences("j", MODE_PRIVATE).getString("hl", "") ?: ""
@@ -119,15 +120,16 @@ class HologramActivity : Activity() {
         handle(intent)
     }
 
-    override fun onNewIntent(i: Intent) {
-        super.onNewIntent(i)
-        setIntent(i)
-        handle(i)
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handle(intent)
     }
 
     private fun handle(i: Intent?) {
-        val d = i?.getStringExtra("desc")
-        if (!d.isNullOrBlank()) {
+        if (i == null) return
+        val d = i.getStringExtra("desc")
+        if (d != null && d.isNotBlank()) {
             input.setText(d)
             build(d, i.getBooleanExtra("modify", false))
         }
@@ -148,8 +150,8 @@ class HologramActivity : Activity() {
     private fun toggleChrome() {
         chrome = !chrome
         val v = if (chrome) View.VISIBLE else View.GONE
-        top.visibility = v
-        bottom.visibility = v
+        topBar.visibility = v
+        bottomBar.visibility = v
     }
 
     private fun build(desc: String, modify: Boolean) {
@@ -173,10 +175,11 @@ class HologramActivity : Activity() {
                     }
                 }
                 val mm = model ?: throw (err ?: Exception("Model hoyni"))
+                val finalJson = json
                 runOnUiThread {
                     if (g == gen) {
-                        lastJson = json
-                        getSharedPreferences("j", MODE_PRIVATE).edit().putString("hl", json).apply()
+                        lastJson = finalJson
+                        getSharedPreferences("j", MODE_PRIVATE).edit().putString("hl", finalJson).apply()
                         holo.model = mm
                         status.text = mm.name + "  |  " + mm.edgeCount + " lines  |  tap: menu"
                     }
