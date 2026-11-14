@@ -1051,6 +1051,7 @@ class JarvisService : Service() {
     private val tools: JSONArray by lazy {
         JSONArray().put(JSONObject().put("functionDeclarations", JSONArray()
             .put(fn("whatsapp_message", "Send a WhatsApp text message to a contact name or phone number", "to" to "string", "message" to "string"))
+            .put(fn("hologram", "Show a 3D hologram of any object, machine, building or invention the user describes, or modify the previous one", "description" to "string", "modify" to "boolean"))
             .put(fn("get_weather", "Get current weather and today's forecast for a city", "city" to "string"))
             .put(fn("remember", "Save a short fact about the user to long-term memory", "fact" to "string"))
             .put(fn("forget", "Forget saved memories that contain a keyword, or all of them", "keyword" to "string"))
@@ -1314,6 +1315,7 @@ class JarvisService : Service() {
         if (name in uiNames) uiActive = true
         return when (name) {
             "whatsapp_message" -> whatsappMessage(a.optString("to"), a.optString("message"))
+            "hologram" -> if (launch(Intent(this, HologramActivity::class.java).putExtra("desc", a.optString("description")).putExtra("modify", a.optBoolean("modify")))) "Hologram screen opened, the model is being built" else "Could not open the hologram screen"
             "get_weather" -> getWeather(a.optString("city"))
             "remember" -> JarvisMemory.add(this, a.optString("fact"))
             "forget" -> JarvisMemory.forget(this, a.optString("keyword"))
