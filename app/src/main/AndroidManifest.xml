@@ -21,7 +21,7 @@
     <application
         android:label="Jarvis"
         android:allowBackup="false"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@android:style/Theme.Material.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -30,16 +30,11 @@
         </activity>
         <activity
             android:name=".HologramActivity"
-            android:exported="true"
+            android:exported="false"
             android:label="Jarvis Hologram"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:theme="@android:style/Theme.Material.NoActionBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:theme="@android:style/Theme.Material.NoActionBar" />
         <service
             android:name=".JarvisService"
             android:exported="false"
