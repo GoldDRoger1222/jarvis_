@@ -5,9 +5,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 
 object HoloGen {
-    private val models = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+    private val smart = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+    private val fast = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash")
+    private val cool = ConcurrentHashMap<String, Long>()
+    private val dead = ConcurrentHashMap.newKeySet<String>()
+    private val guideCache = ConcurrentHashMap<String, String>()
 
     private val spec = """
 You are a senior mechanical designer. Build an ACCURATE 3D hologram blueprint of the requested object from simple primitives. Reply with ONE JSON object only. No markdown, no explanation.
@@ -48,14 +53,24 @@ Example (single cylinder engine, shortened):
         val prompt = if (previous.isNullOrBlank()) spec + "\n\nObject to design: " + desc
         else spec + "\n\nCurrent model:\n" + previous +
             "\n\nChange it as requested and return the complete new JSON.\nRequest: " + desc
-        return ask(key, prompt, true)
+        return ask(key, prompt, true, smart, null, 170000L, 80000L)
     }
 
-    fun guide(ctx: Context, model: String, group: String, parts: List<String>, groups: List<String>): String {
+    fun guide(
+        ctx: Context,
+        model: String,
+        group: String,
+        parts: List<String>,
+        groups: List<String>,
+        status: ((String) -> Unit)? = null
+    ): String {
         val sp = ctx.getSharedPreferences("j", Context.MODE_PRIVATE)
         val key = sp.getString("k", "")?.trim().orEmpty()
         if (key.isEmpty()) throw Exception("Gemini key nai, main Jarvis app e dao")
         val bn = (sp.getString("l", "bn-BD") ?: "bn-BD") == "bn-BD"
+        val ck = (if (bn) "bn|" else "en|") + model + "|" + group
+        val cached = guideCache[ck]
+        if (cached != null) return cached
         val lang = if (bn) "Bangla (Bengali script), keeping technical terms and part names in English" else "English"
         val prompt = "You are a senior engineer explaining to a hobbyist how to build one component of a real object.\n" +
             "Object: " + model + "\n" +
@@ -70,47 +85,100 @@ Example (single cylinder engine, shortened):
             "HOW IT CONNECTS (to which other components, and how it moves)\n" +
             "COMMON MISTAKES (3 short points)\n" +
             "Keep it under 350 words. Be accurate and practical. If the object is fictional, say so in one line and describe a plausible version. Mention safety for anything electrical, fuel or high speed."
-        return ask(key, prompt, false)
+        val out = ask(key, prompt, false, fast, status, 100000L, 40000L).trim()
+        if (out.isNotEmpty()) guideCache[ck] = out
+        return out
     }
 
-    private fun ask(key: String, prompt: String, json: Boolean): String {
+    private fun ask(
+        key: String,
+        prompt: String,
+        json: Boolean,
+        ladder: List<String>,
+        status: ((String) -> Unit)?,
+        budgetMs: Long,
+        perMs: Long
+    ): String {
+        val t0 = System.currentTimeMillis()
         var last: Exception? = null
-        for (m in models) {
-            try {
-                return call(m, key, prompt, json)
-            } catch (e: Exception) {
-                last = e
-                if (json && (e.message ?: "").contains("API 400")) {
-                    try { return call(m, key, prompt, false) } catch (e2: Exception) { last = e2 }
+        for (round in 1..2) {
+            val now = System.currentTimeMillis()
+            for ((i, m) in ladder.withIndex()) {
+                if (dead.contains(m)) continue
+                if ((cool[m] ?: 0L) > now && i < ladder.size - 1) continue
+                val left = budgetMs - (System.currentTimeMillis() - t0)
+                if (left < 8000L) break
+                status?.invoke("Model: " + m)
+                try {
+                    return call(m, key, prompt, json, minOf(left, perMs).toInt())
+                } catch (e: Exception) {
+                    last = e
+                    val msg = e.message ?: ""
+                    val t = System.currentTimeMillis()
+                    if (msg.contains("API 404")) dead.add(m)
+                    else if (msg.contains("API 429")) cool[m] = t + (if (msg.contains("PerDay")) 3600000L else 60000L)
+                    else cool[m] = t + 300000L
+                    status?.invoke("Model " + m + " pelam na, onno model e jachchi...")
                 }
+            }
+            if (round == 1) {
+                if (System.currentTimeMillis() - t0 > budgetMs - 12000L) break
+                status?.invoke("Gemini busy, 6s por abar chesta...")
+                Thread.sleep(6000)
+                cool.clear()
             }
         }
         throw last ?: Exception("Gemini error")
     }
 
-    private fun call(model: String, key: String, prompt: String, json: Boolean): String {
+    private fun call(model: String, key: String, prompt: String, json: Boolean, timeoutMs: Int): String {
+        try {
+            return post(model, key, prompt, json, true, timeoutMs)
+        } catch (e: Exception) {
+            if ((e.message ?: "").contains("API 400")) return post(model, key, prompt, false, false, timeoutMs)
+            throw e
+        }
+    }
+
+    private fun post(
+        model: String,
+        key: String,
+        prompt: String,
+        json: Boolean,
+        think: Boolean,
+        timeoutMs: Int
+    ): String {
         val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user")
             .put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
-        if (json) body.put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
+        val cfg = JSONObject()
+        if (json) cfg.put("responseMimeType", "application/json")
+        if (think) cfg.put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
+        if (cfg.length() > 0) body.put("generationConfig", cfg)
         val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             .openConnection() as HttpURLConnection
-        c.requestMethod = "POST"
-        c.setRequestProperty("Content-Type", "application/json")
-        c.setRequestProperty("x-goog-api-key", key)
-        c.connectTimeout = 15000
-        c.readTimeout = 120000
-        c.doOutput = true
-        c.outputStream.use { it.write(body.toString().toByteArray()) }
-        val ok = c.responseCode in 200..299
-        val txt = (if (ok) c.inputStream else c.errorStream).bufferedReader().readText()
-        if (!ok) throw Exception("API ${c.responseCode}: ${txt.take(300)}")
-        val parts = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
-            .getJSONObject("content").getJSONArray("parts")
-        val sb = StringBuilder()
-        for (i in 0 until parts.length()) {
-            val p = parts.getJSONObject(i)
-            if (!p.optBoolean("thought")) sb.append(p.optString("text"))
+        try {
+            c.requestMethod = "POST"
+            c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("x-goog-api-key", key)
+            c.connectTimeout = 15000
+            c.readTimeout = timeoutMs
+            c.doOutput = true
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            val ok = c.responseCode in 200..299
+            val txt = (if (ok) c.inputStream else c.errorStream).bufferedReader().readText()
+            if (!ok) throw Exception("API ${c.responseCode}: ${txt.take(1200)}")
+            val ps = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
+                .getJSONObject("content").getJSONArray("parts")
+            val sb = StringBuilder()
+            for (i in 0 until ps.length()) {
+                val p = ps.getJSONObject(i)
+                if (!p.optBoolean("thought")) sb.append(p.optString("text"))
+            }
+            val out = sb.toString()
+            if (out.isBlank()) throw Exception("Empty reply")
+            return out
+        } finally {
+            c.disconnect()
         }
-        return sb.toString()
     }
 }
