@@ -22,7 +22,8 @@ class HoloPart(
     val speed: Float,
     val amp: Float,
     val hz: Float,
-    val phase: Float
+    val phase: Float,
+    val shape: Int = 0
 )
 
 private class Tmp(
@@ -37,7 +38,8 @@ private class Tmp(
     val speed: Double,
     val amp: Double,
     val hz: Double,
-    val phase: Double
+    val phase: Double,
+    val shape: Int
 )
 
 class HoloModel(
@@ -87,6 +89,15 @@ class HoloModel(
                         val lb = arr(p, "b", doubleArrayOf(0.0, 1.0, 0.0))
                         doubleArrayOf((la[0] + lb[0]) / 2, (la[1] + lb[1]) / 2, (la[2] + lb[2]) / 2)
                     } else arr(p, "p", zero)
+                    val shp = when (t) {
+                        "box" -> 0
+                        "cyl", "cylinder" -> 1
+                        "cone" -> 2
+                        "sph", "sphere" -> 3
+                        "pyr", "pyramid" -> 4
+                        "tor", "torus" -> 5
+                        else -> 6
+                    }
                     addPart(p, vs, es)
                     if (vs.size == v0) continue
                     var kind = 0
@@ -119,7 +130,7 @@ class HoloModel(
                     val nm = p.optString("n").ifBlank { t + " " + (i + 1) }
                     val gp = p.optString("g").ifBlank { nm }
                     tmps.add(Tmp(nm.take(40), gp.take(40), role(p.optString("c")), v0, vs.size,
-                        kind, axis, piv, speed, amp, hz, phase))
+                        kind, axis, piv, speed, amp, hz, phase, shp))
                 } catch (ex: Exception) {
                     while (vs.size > v0) vs.removeAt(vs.size - 1)
                     while (es.size > e0) es.removeAt(es.size - 1)
@@ -165,7 +176,7 @@ class HoloModel(
                     ((t.piv[0] - c[0]) / rad).toFloat(),
                     ((t.piv[1] - c[1]) / rad).toFloat(),
                     ((t.piv[2] - c[2]) / rad).toFloat(),
-                    t.speed.toFloat(), ampN.toFloat(), t.hz.toFloat(), t.phase.toFloat()))
+                    t.speed.toFloat(), ampN.toFloat(), t.hz.toFloat(), t.phase.toFloat(), t.shape))
             }
 
             val ne = minOf(es.size, 7000)
