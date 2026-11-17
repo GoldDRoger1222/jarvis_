@@ -35,6 +35,9 @@ Rules:
 - Use 40 to 100 parts. Keep the whole object inside about -1.5 to 1.5.
 - Moving parts must really move (spin, slide or swing) at believable speeds, and meshing gears turn in opposite directions.
 - If the object is fictional or an invention, design a plausible working version with a visible mechanism.
+- Design it so that it looks good in an exploded view: build it from clearly separate sub-assemblies (g), each a coherent component such as Turbine assembly, Fuel injector, Piston and rod, Gear train, Housing, Crankshaft.
+- Round parts such as gears, flanges and turbine discs: use cyl with seg 24 or more plus tor rings for rims, and add thin boxes as blades or spokes around them. Make small parts such as bolts, injectors and pins separate small cyl or box parts.
+- Use colour roles to separate materials: metal for housings and gears, accent for key moving parts, glass for transparent covers, power for energy parts.
 Example (single cylinder engine, shortened):
 {"name":"single cylinder engine","parts":[{"t":"box","n":"Crankcase","g":"Engine block","c":"metal","p":[0,-0.45,0],"s":[1.1,0.6,0.7]},{"t":"cyl","n":"Cylinder barrel","g":"Engine block","c":"metal","p":[0,0.2,0],"s":[0.5,0.8,0.5]},{"t":"cyl","n":"Cylinder head","g":"Cylinder head","c":"body","p":[0,0.7,0],"s":[0.56,0.2,0.56]},{"t":"cyl","n":"Piston","g":"Piston assembly","c":"accent","p":[0,0.05,0],"s":[0.46,0.22,0.46],"a":{"k":"osc","axis":[0,1,0],"amp":0.2,"hz":1.5}},{"t":"cyl","n":"Crankshaft","g":"Crank assembly","c":"hot","p":[0,-0.45,0],"s":[0.12,1.2,0.12],"r":[0,0,90],"a":{"k":"rot","axis":[1,0,0],"dps":540}},{"t":"cyl","n":"Flywheel","g":"Crank assembly","c":"power","p":[0.62,-0.45,0],"s":[0.7,0.1,0.7],"r":[0,0,90],"a":{"k":"rot","axis":[1,0,0],"o":[0.62,-0.45,0],"dps":540}},{"t":"cyl","n":"Spark plug","g":"Cylinder head","c":"glass","p":[0.15,0.88,0],"s":[0.07,0.2,0.07]}]}
 """.trimIndent()
