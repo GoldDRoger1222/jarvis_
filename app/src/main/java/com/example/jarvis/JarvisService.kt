@@ -1052,6 +1052,7 @@ class JarvisService : Service() {
         JSONArray().put(JSONObject().put("functionDeclarations", JSONArray()
             .put(fn("whatsapp_message", "Send a WhatsApp text message to a contact name or phone number", "to" to "string", "message" to "string"))
             .put(fn("hologram", "Show a 3D hologram of any object, machine, building or invention the user describes, or modify the previous one", "description" to "string", "modify" to "boolean"))
+                        .put(HoloCmd.decl())
             .put(fn("get_weather", "Get current weather and today's forecast for a city", "city" to "string"))
             .put(fn("remember", "Save a short fact about the user to long-term memory", "fact" to "string"))
             .put(fn("forget", "Forget saved memories that contain a keyword, or all of them", "keyword" to "string"))
