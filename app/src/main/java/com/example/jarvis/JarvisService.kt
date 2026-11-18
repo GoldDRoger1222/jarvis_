@@ -1317,6 +1317,7 @@ class JarvisService : Service() {
         return when (name) {
             "whatsapp_message" -> whatsappMessage(a.optString("to"), a.optString("message"))
             "hologram" -> if (launch(Intent(this, HologramActivity::class.java).putExtra("desc", a.optString("description")).putExtra("modify", a.optBoolean("modify")))) "Hologram screen opened, the model is being built" else "Could not open the hologram screen"
+                        "hologram_control" -> HoloCmd.run(this, a) { launch(it) }
             "get_weather" -> getWeather(a.optString("city"))
             "remember" -> JarvisMemory.add(this, a.optString("fact"))
             "forget" -> JarvisMemory.forget(this, a.optString("keyword"))
