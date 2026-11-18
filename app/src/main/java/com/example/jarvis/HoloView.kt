@@ -5,11 +5,11 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
+import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.os.Build
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -21,6 +21,14 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 class HoloView(ctx: Context) : View(ctx) {
+    companion object {
+        @Volatile var active: HoloView? = null
+    }
+
+    private val revs = ArrayList<String>()
+    private var revIdx = -1
+    private var applying = false
+
     var model: HoloModel? = null
         set(v) {
             field = v
@@ -31,6 +39,14 @@ class HoloView(ctx: Context) : View(ctx) {
             exploded = false
             explT = 0f
             prepare(v)
+            if (v != null && !applying && v.json.isNotEmpty()) {
+                while (revs.size > revIdx + 1) revs.removeAt(revs.size - 1)
+                if (revs.isEmpty() || revs[revs.size - 1] != v.json) {
+                    revs.add(v.json)
+                    if (revs.size > 20) revs.removeAt(0)
+                }
+                revIdx = revs.size - 1
+            }
         }
     var pyramid = false
     var flip = false
@@ -39,9 +55,11 @@ class HoloView(ctx: Context) : View(ctx) {
     var pitch = 0.3f
     var zoom = 1f
     var exploded = false
+    var look = 0
     var onTap: (() -> Unit)? = null
 
     private val dens = ctx.resources.displayMetrics.density
+    private val lookNames = arrayOf("HOLO", "SOLID", "WIRE", "XRAY")
     private var sel = -1
     private var iso = false
     private var isoT = 0f
@@ -55,11 +73,16 @@ class HoloView(ctx: Context) : View(ctx) {
     private var fps = 60f
     private var fpsAcc = 0f
     private var fpsN = 0
+    private var note = ""
+    private var noteUntil = 0L
 
     private var av = FloatArray(0)
     private var px = FloatArray(0)
     private var py = FloatArray(0)
     private var pz = FloatArray(0)
+    private var rx = FloatArray(0)
+    private var ry = FloatArray(0)
+    private var rz = FloatArray(0)
     private var roleIdx: Array<IntArray> = emptyArray()
     private var bufA: Array<FloatArray> = emptyArray()
     private var bufB: Array<FloatArray> = emptyArray()
@@ -68,6 +91,10 @@ class HoloView(ctx: Context) : View(ctx) {
     private val cntB = IntArray(HoloModel.ROLES * 3)
     private var cntH = 0
 
+    private var triKeys = LongArray(0)
+    private var triVerts = FloatArray(0)
+    private var triCols = IntArray(0)
+
     private var grpOx = FloatArray(0)
     private var grpOy = FloatArray(0)
     private var grpOz = FloatArray(0)
@@ -75,13 +102,6 @@ class HoloView(ctx: Context) : View(ctx) {
     private var grpSx = FloatArray(0)
     private var grpSy = FloatArray(0)
     private var orderG = IntArray(0)
-
-    private var hxs = FloatArray(0)
-    private var hys = FloatArray(0)
-    private var hsx = FloatArray(0)
-    private var hsy = FloatArray(0)
-    private var hkey = LongArray(0)
-    private var hh = IntArray(0)
     private val path = Path()
 
     private val lbl = IntArray(9)
@@ -99,6 +119,9 @@ class HoloView(ctx: Context) : View(ctx) {
     private var menuRowH = 1f
     private var menuCount = 0
     private val menuG = IntArray(12)
+
+    private var chipsOn = false
+    private val chipR = Array(3) { RectF() }
 
     private var scanBuf = FloatArray(0)
     private var starX = FloatArray(0)
@@ -135,19 +158,17 @@ class HoloView(ctx: Context) : View(ctx) {
     private val frameV = stroke(90, 2f, 170, 100, 255)
     private val barP = Paint().apply { color = Color.argb(24, 120, 255, 255) }
     private val panelP = Paint().apply { style = Paint.Style.FILL; color = Color.argb(95, 5, 15, 35) }
+    private val chipFill = Paint().apply { style = Paint.Style.FILL; color = Color.argb(130, 5, 15, 35) }
     private val selP = Paint().apply { style = Paint.Style.FILL; color = Color.argb(60, 255, 240, 150) }
     private val barBg = Paint().apply { style = Paint.Style.FILL; color = Color.argb(60, 0, 229, 255) }
     private val barFg = Paint().apply { style = Paint.Style.FILL; color = Color.argb(200, 0, 229, 255) }
+    private val faceP = Paint().apply { color = Color.WHITE }
     private val nebA = Paint()
     private val nebB = Paint()
     private val starPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val dotP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.argb(255, 255, 240, 150)
-    }
-    private val fillP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
     }
     private val txtP = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(160, 0, 229, 255)
@@ -191,7 +212,7 @@ class HoloView(ctx: Context) : View(ctx) {
             return true
         }
         override fun onLongPress(e: MotionEvent) {
-            if (!pyramid && !iso && model != null) {
+            if (!pyramid && !iso && model != null && chipHit(e.x, e.y) < 0) {
                 exploded = !exploded
                 performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
             }
@@ -220,7 +241,19 @@ class HoloView(ctx: Context) : View(ctx) {
         starPh = FloatArray(90) { rnd.nextFloat() * 6.28f }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        active = this
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility == View.VISIBLE) active = this
+        else if (active === this) active = null
+    }
+
     override fun onDetachedFromWindow() {
+        if (active === this) active = null
         PartGuide.dismiss()
         super.onDetachedFromWindow()
     }
@@ -245,6 +278,176 @@ class HoloView(ctx: Context) : View(ctx) {
         return true
     }
 
+    // ---------- public actions ----------
+
+    fun flashNote(s: String) {
+        note = s
+        noteUntil = System.currentTimeMillis() + 1800L
+    }
+
+    fun cycleLook() {
+        look = (look + 1) % 4
+        flashNote("LOOK: " + lookNames[look])
+    }
+
+    fun resetView() {
+        yaw = 0f
+        pitch = 0.3f
+        zoom = 1f
+    }
+
+    fun currentJson(): String? = model?.json
+
+    fun loadJson(json: String): String {
+        return try {
+            model = HoloModel.parse(json)
+            context.getSharedPreferences("j", Context.MODE_PRIVATE).edit().putString("hl", json).apply()
+            "Loaded " + (model?.name ?: "")
+        } catch (e: Exception) {
+            "Invalid model file"
+        }
+    }
+
+    private fun applyRev(i: Int, label: String): String {
+        return try {
+            val m = HoloModel.parse(revs[i])
+            applying = true
+            model = m
+            applying = false
+            revIdx = i
+            context.getSharedPreferences("j", Context.MODE_PRIVATE).edit().putString("hl", revs[i]).apply()
+            label + " done (" + (i + 1) + "/" + revs.size + ")"
+        } catch (e: Exception) {
+            applying = false
+            "Could not load that revision"
+        }
+    }
+
+    fun undo(): String = if (revIdx <= 0) "Nothing to undo" else applyRev(revIdx - 1, "Undo")
+
+    fun redo(): String = if (revIdx < 0 || revIdx >= revs.size - 1) "Nothing to redo" else applyRev(revIdx + 1, "Redo")
+
+    fun exportStl(sizeMm: Float, share: Boolean): String {
+        val m = model ?: return "No model is loaded"
+        return try {
+            val bytes = Stl.build(m, sizeMm)
+            val clean = m.name.replace(Regex("[^A-Za-z0-9_-]"), "_").take(30).ifBlank { "model" }
+            val name = clean + "_" + (System.currentTimeMillis() % 100000L) + ".stl"
+            val res = Exporter.save(context, name, bytes, "model/stl")
+            val u = res.uri
+            if (share && u != null) Exporter.share(context, u, "model/stl")
+            flashNote("STL saved")
+            "STL saved: " + res.path + " (" + sizeMm.toInt() + " mm)"
+        } catch (e: Exception) {
+            "STL export failed: " + (e.message ?: "")
+        }
+    }
+
+    private fun findGroup(m: HoloModel, q: String): Int {
+        val n = q.lowercase().trim()
+        if (n.isEmpty()) return -1
+        val toks = n.split(' ', '-', '_').filter { it.length > 1 }
+        var best = -1
+        var bs = 0
+        for (g in m.groupNames.indices) {
+            val gn = m.groupNames[g].lowercase()
+            var s = 0
+            if (gn == n) s = 100
+            else if (gn.contains(n) || n.contains(gn)) s = 80
+            else for (w in toks) if (gn.contains(w)) s += 25
+            if (s > bs) {
+                bs = s
+                best = g
+            }
+        }
+        if (bs >= 25) return best
+        for ((pi, pt) in m.parts.withIndex()) {
+            val pn = pt.name.lowercase()
+            if (pn == n || pn.contains(n) || n.contains(pn)) return m.partGroup[pi]
+        }
+        return -1
+    }
+
+    fun command(action: String, target: String): String {
+        val m = model ?: return "No model is loaded"
+        val a = action.trim().lowercase().replace(' ', '_')
+        val t = target.trim()
+        return when (a) {
+            "explode" -> { exploded = true; "Exploded view on" }
+            "assemble" -> { exploded = false; "Assembled" }
+            "select", "isolate" -> {
+                val g = findGroup(m, t)
+                if (g < 0) "No component named '" + t + "'. Components: " + m.groupNames.joinToString(", ")
+                else {
+                    if (iso) { iso = false; PartGuide.dismiss() }
+                    if (a == "select") { sel = g; "Selected " + m.groupNames[g] }
+                    else { startIso(m, g); "Isolated " + m.groupNames[g] + " and opened its build guide" }
+                }
+            }
+            "back", "deselect" -> { iso = false; sel = -1; PartGuide.dismiss(); "Back to the full model" }
+            "rotate" -> {
+                val tl = t.lowercase()
+                val deg = tl.toFloatOrNull()
+                if (deg != null) yaw += Math.toRadians(deg.toDouble()).toFloat()
+                else if (tl.contains("left")) yaw -= 0.7f
+                else if (tl.contains("up")) pitch = (pitch - 0.4f).coerceIn(-1.4f, 1.4f)
+                else if (tl.contains("down")) pitch = (pitch + 0.4f).coerceIn(-1.4f, 1.4f)
+                else yaw += 0.7f
+                "Rotated"
+            }
+            "zoom" -> {
+                val tl = t.lowercase()
+                val z = tl.toFloatOrNull()
+                if (z != null) zoom = z.coerceIn(0.4f, 3f)
+                else if (tl.contains("out")) zoom = (zoom / 1.35f).coerceIn(0.4f, 3f)
+                else if (tl.contains("reset")) zoom = 1f
+                else zoom = (zoom * 1.35f).coerceIn(0.4f, 3f)
+                "Zoom " + (zoom * 100).toInt() + " percent"
+            }
+            "spin" -> {
+                val tl = t.lowercase()
+                spin = if (tl.contains("off") || tl.contains("stop")) false
+                else if (tl.contains("on") || tl.contains("start")) true else !spin
+                if (spin) "Spin on" else "Spin off"
+            }
+            "look" -> {
+                val tl = t.lowercase()
+                val idx = when {
+                    tl.contains("holo") -> 0
+                    tl.contains("solid") -> 1
+                    tl.contains("wire") -> 2
+                    (tl.contains("x") && tl.contains("ray")) || tl.contains("internal") -> 3
+                    else -> -1
+                }
+                look = if (idx >= 0) idx else (look + 1) % 4
+                flashNote("LOOK: " + lookNames[look])
+                "Look: " + lookNames[look]
+            }
+            "save" -> {
+                val nm = ProjectStore.save(context, if (t.isBlank()) m.name else t, m.json)
+                flashNote("SAVED: " + nm)
+                "Saved project as " + nm
+            }
+            "load" -> {
+                val nm = ProjectStore.find(context, t)
+                if (nm == null) "No saved project named '" + t + "'. Saved: " + ProjectStore.list(context).joinToString(", ")
+                else {
+                    val js = ProjectStore.load(context, nm)
+                    if (js == null) "Could not read the project" else loadJson(js)
+                }
+            }
+            "list" -> {
+                val l = ProjectStore.list(context)
+                if (l.isEmpty()) "No saved projects" else "Saved projects: " + l.joinToString(", ")
+            }
+            "export_stl", "export", "stl" -> exportStl(t.toFloatOrNull() ?: 100f, false)
+            "undo" -> undo()
+            "redo" -> redo()
+            "reset_view", "reset" -> { resetView(); "View reset" }
+            else -> "Unknown hologram action: " + action
+        }
+    }
+
     // ---------- selection ----------
 
     private fun distSeg(x: Float, y: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
@@ -256,6 +459,12 @@ class HoloView(ctx: Context) : View(ctx) {
         val qx = ax + t * dx - x
         val qy = ay + t * dy - y
         return sqrt(qx * qx + qy * qy)
+    }
+
+    private fun chipHit(x: Float, y: Float): Int {
+        if (!chipsOn) return -1
+        for (i in 0..2) if (chipR[i].contains(x, y)) return i
+        return -1
     }
 
     private fun menuHit(x: Float, y: Float): Int {
@@ -289,6 +498,15 @@ class HoloView(ctx: Context) : View(ctx) {
 
     private fun tapAt(x: Float, y: Float) {
         if (pyramid) { onTap?.invoke(); return }
+        val ch = chipHit(x, y)
+        if (ch >= 0) {
+            when (ch) {
+                0 -> cycleLook()
+                1 -> exploded = !exploded
+                else -> HoloTools.show(this)
+            }
+            return
+        }
         val hg = menuHit(x, y)
         if (hg == -2) return
         if (hg >= 0) {
@@ -311,6 +529,7 @@ class HoloView(ctx: Context) : View(ctx) {
     private fun doubleAt(x: Float, y: Float) {
         if (pyramid) return
         val m = model ?: return
+        if (chipHit(x, y) >= 0) return
         if (iso) {
             iso = false
             PartGuide.dismiss()
@@ -369,6 +588,9 @@ class HoloView(ctx: Context) : View(ctx) {
         px = FloatArray(n)
         py = FloatArray(n)
         pz = FloatArray(n)
+        rx = FloatArray(n)
+        ry = FloatArray(n)
+        rz = FloatArray(n)
         val ne = m.edgeCount
         val counts = IntArray(HoloModel.ROLES)
         for (k in 0 until ne) counts[m.edgeRole[k]]++
@@ -501,6 +723,9 @@ class HoloView(ctx: Context) : View(ctx) {
             val z1 = -x * sy + z * cy
             val y2 = y * cp - z1 * sp
             val z2 = y * sp + z1 * cp
+            rx[i] = x1
+            ry[i] = y2
+            rz[i] = z2
             val k = 3.4f / (3.4f + z2)
             px[i] = x1 * k
             py[i] = -y2 * k
@@ -519,61 +744,88 @@ class HoloView(ctx: Context) : View(ctx) {
         }
     }
 
-    // ---------- glass fill ----------
+    // ---------- shaded faces ----------
 
-    private fun cr(a: Int, b: Int, c2: Int): Float =
-        (hsx[b] - hsx[a]) * (hsy[c2] - hsy[a]) - (hsy[b] - hsy[a]) * (hsx[c2] - hsx[a])
-
-    private fun fillPart(c: Canvas, pt: HoloPart, sc: Float, f: Float, hl: Boolean) {
-        val n = pt.end - pt.start
-        if (n < 3 || n > 400 || f < 0.03f) return
-        if (hkey.size < n) {
-            hxs = FloatArray(n)
-            hys = FloatArray(n)
-            hsx = FloatArray(n)
-            hsy = FloatArray(n)
-            hkey = LongArray(n)
-            hh = IntArray(2 * n + 2)
+    private fun drawFaces(c: Canvas, m: HoloModel, sc: Float, alpha: Int, fOthers: Float) {
+        val nt = m.tris.size / 3
+        if (nt == 0 || Build.VERSION.SDK_INT < 29 || rx.size < m.verts.size / 3) return
+        if (triKeys.size < nt) {
+            triKeys = LongArray(nt)
+            triVerts = FloatArray(nt * 6)
+            triCols = IntArray(nt * 3)
         }
-        var zs = 0f
-        for (j in 0 until n) {
-            val i = pt.start + j
-            val x = px[i] * sc
-            val y = py[i] * sc
-            hxs[j] = x
-            hys[j] = y
-            zs += pz[i]
-            hkey[j] = (((x + 30000f) * 8f).toInt().toLong() shl 20) or j.toLong()
+        val t = m.tris
+        val sep = isoT >= 0.01f
+        var cnt = 0
+        for (q in 0 until nt) {
+            val a = t[3 * q]
+            val g = m.partGroup[m.vertPart[a]]
+            val f = if (sel >= 0 && g == sel) 1f else fOthers
+            if (f < 0.04f) continue
+            val z = (rz[a] + rz[t[3 * q + 1]] + rz[t[3 * q + 2]]) / 3f
+            triKeys[cnt++] = (((z + 6f) * 10000f).toInt().toLong() shl 20) or q.toLong()
         }
-        java.util.Arrays.sort(hkey, 0, n)
-        for (j in 0 until n) {
-            val id = (hkey[j] and 0xFFFFFL).toInt()
-            hsx[j] = hxs[id]
-            hsy[j] = hys[id]
+        java.util.Arrays.sort(triKeys, 0, cnt)
+        var vi = 0
+        var ci = 0
+        for (k in cnt - 1 downTo 0) {
+            val q = (triKeys[k] and 0xFFFFFL).toInt()
+            val a = t[3 * q]
+            val b = t[3 * q + 1]
+            val d = t[3 * q + 2]
+            val ux = rx[b] - rx[a]
+            val uy = ry[b] - ry[a]
+            val uz = rz[b] - rz[a]
+            val wx = rx[d] - rx[a]
+            val wy = ry[d] - ry[a]
+            val wz = rz[d] - rz[a]
+            var nx = uy * wz - uz * wy
+            var ny = uz * wx - ux * wz
+            var nz = ux * wy - uy * wx
+            val len = sqrt(nx * nx + ny * ny + nz * nz)
+            if (len < 1e-9f) continue
+            nx /= len
+            ny /= len
+            nz /= len
+            val pi = m.vertPart[a]
+            val part = m.parts[pi]
+            val isSel = sel >= 0 && m.partGroup[pi] == sel
+            val f = if (isSel) 1f else fOthers
+            val col = HoloModel.PALETTE[part.role]
+            val diff = abs(nx * -0.40f + ny * 0.60f + nz * -0.69f)
+            val rim = 1f - abs(nz)
+            val br = 0.30f + 0.70f * diff
+            var rr = Color.red(col) * br + rim * rim * 50f
+            var gg = Color.green(col) * br + rim * rim * 50f
+            var bb = Color.blue(col) * br + rim * rim * 70f
+            if (part.role == 1 || part.role == 4) {
+                val sp = diff * diff * diff * diff * 90f
+                rr += sp
+                gg += sp
+                bb += sp
+            }
+            if (isSel && !sep) {
+                rr = rr * 0.55f + 255f * 0.45f
+                gg = gg * 0.55f + 235f * 0.45f
+                bb = bb * 0.55f + 120f * 0.45f
+            }
+            var al = alpha * f
+            if (part.role == 4) al *= 0.55f
+            val cc = Color.argb(al.toInt().coerceIn(0, 255), rr.toInt().coerceIn(0, 255),
+                gg.toInt().coerceIn(0, 255), bb.toInt().coerceIn(0, 255))
+            triVerts[vi++] = px[a] * sc
+            triVerts[vi++] = py[a] * sc
+            triVerts[vi++] = px[b] * sc
+            triVerts[vi++] = py[b] * sc
+            triVerts[vi++] = px[d] * sc
+            triVerts[vi++] = py[d] * sc
+            triCols[ci++] = cc
+            triCols[ci++] = cc
+            triCols[ci++] = cc
         }
-        var k = 0
-        for (i in 0 until n) {
-            while (k >= 2 && cr(hh[k - 2], hh[k - 1], i) <= 0f) k--
-            hh[k++] = i
+        if (vi > 0) {
+            c.drawVertices(Canvas.VertexMode.TRIANGLES, vi, triVerts, 0, null, 0, triCols, 0, null, 0, 0, faceP)
         }
-        val t = k + 1
-        for (i in n - 2 downTo 0) {
-            while (k >= t && cr(hh[k - 2], hh[k - 1], i) <= 0f) k--
-            hh[k++] = i
-        }
-        if (k < 4) return
-        path.reset()
-        path.moveTo(hsx[hh[0]], hsy[hh[0]])
-        for (i in 1 until k - 1) path.lineTo(hsx[hh[i]], hsy[hh[i]])
-        path.close()
-        val col = HoloModel.PALETTE[pt.role]
-        val mix = (((zs / n) + 1f) * 0.5f).coerceIn(0f, 1f) * 0.65f
-        val r = (Color.red(col) + (140 - Color.red(col)) * mix).toInt()
-        val g = (Color.green(col) + (90 - Color.green(col)) * mix).toInt()
-        val b = (Color.blue(col) + (255 - Color.blue(col)) * mix).toInt()
-        fillP.color = if (hl) Color.argb(60, 255, 235, 140)
-        else Color.argb((26 * f).toInt().coerceIn(0, 255), r, g, b)
-        c.drawPath(path, fillP)
     }
 
     // ---------- edges ----------
@@ -679,6 +931,27 @@ class HoloView(ctx: Context) : View(ctx) {
         c.drawPath(path, frameV)
     }
 
+    private fun drawChips(c: Canvas, w: Float, h: Float, land: Boolean) {
+        val cw = 74f * dens
+        val ch = 28f * dens
+        val gap = 6f * dens
+        val x = if (land) w * 0.03f else 8f * dens
+        val y0 = if (land) h * 0.56f else h / 2 - (ch * 3 + gap * 2) / 2
+        val labels = arrayOf("LOOK " + lookNames[look], if (exploded) "ASSEMBLE" else "EXPLODE", "TOOLS")
+        monoP.textSize = 8.5f * dens
+        monoP.textAlign = Paint.Align.CENTER
+        monoP.color = Color.argb(240, 150, 235, 255)
+        for (i in 0..2) {
+            val y = y0 + i * (ch + gap)
+            chipR[i].set(x, y, x + cw, y + ch)
+            c.drawRoundRect(chipR[i], 8f * dens, 8f * dens, chipFill)
+            c.drawRoundRect(chipR[i], 8f * dens, 8f * dens, panelS)
+            c.drawText(labels[i], x + cw / 2, y + ch / 2 + 3f * dens, monoP)
+        }
+        monoP.textAlign = Paint.Align.LEFT
+        chipsOn = true
+    }
+
     private fun drawLabels(c: Canvas, m: HoloModel, sc: Float, cx: Float, cy: Float, w: Float, h: Float) {
         if (iso || grpN.size != m.groupNames.size) return
         var n = 0
@@ -741,6 +1014,7 @@ class HoloView(ctx: Context) : View(ctx) {
 
     private fun drawHud(c: Canvas, m: HoloModel, w: Float, h: Float, land: Boolean) {
         monoP.textSize = 9f * dens
+        monoP.color = Color.argb(220, 150, 235, 255)
         var moving = 0
         for (pt in m.parts) if (pt.kind != 0) moving++
         val ex = (explT * 100f).toInt()
@@ -843,6 +1117,7 @@ class HoloView(ctx: Context) : View(ctx) {
         val cy = h / 2
         val m = model
         menuOn = false
+        chipsOn = false
         if (pyramid) c.drawColor(Color.BLACK) else drawSpace(c, w, h)
 
         if (m == null) {
@@ -886,25 +1161,24 @@ class HoloView(ctx: Context) : View(ctx) {
                 }
                 c.save()
                 c.translate(cx, cy)
-                for ((pi, pt) in m.parts.withIndex()) {
-                    if (pt.shape > 4) continue
-                    val g = m.partGroup[pi]
-                    val isSel = sel >= 0 && g == sel
-                    fillPart(c, pt, sc, if (isSel) 1f else fOthers, isSel && isoT < 0.01f)
-                }
+                if (look != 2) drawFaces(c, m, sc, if (look == 1) 245 else if (look == 3) 45 else 85, fOthers)
                 build(m, sc)
-                flush(c, bufA, cntA, fOthers, true)
-                flush(c, bufB, cntB, 1f, true)
+                if (look != 1) {
+                    flush(c, bufA, cntA, fOthers, true)
+                    flush(c, bufB, cntB, 1f, true)
+                }
                 drawHl(c, true)
                 c.restore()
                 drawLabels(c, m, sc, cx, cy, w, h)
                 drawHud(c, m, w, h, land)
+                drawChips(c, w, h, land)
                 if (sel >= 0 && sel < m.groupNames.size) {
                     c.drawText(m.groupNames[sel], cx, h * 0.15f, labP)
                     if (iso) c.drawText("khali jayga tap = model e fire", cx, h * 0.15f + 36f, hintP)
                 } else if (!land) {
                     c.drawText("tap: select | double-tap: alada | long-press: explode", cx, h - 10f * dens, hintP)
                 }
+                if (System.currentTimeMillis() < noteUntil) c.drawText(note, cx, h * 0.22f, labP)
             }
         }
         postInvalidateOnAnimation()
