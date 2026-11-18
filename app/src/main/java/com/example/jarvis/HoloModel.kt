@@ -2,6 +2,7 @@ package com.example.jarvis
 
 import android.graphics.Color
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -50,7 +51,9 @@ class HoloModel(
     val vertPart: IntArray,
     val edgeRole: IntArray,
     val groupNames: Array<String>,
-    val partGroup: IntArray
+    val partGroup: IntArray,
+    val tris: IntArray,
+    val json: String
 ) {
     val edgeCount: Int get() = edges.size / 2
 
@@ -76,11 +79,13 @@ class HoloModel(
             val parr = o.optJSONArray("parts") ?: throw Exception("parts nai")
             val vs = ArrayList<DoubleArray>()
             val es = ArrayList<IntArray>()
+            val ts = ArrayList<IntArray>()
             val tmps = ArrayList<Tmp>()
             for (i in 0 until minOf(parr.length(), 150)) {
                 val p = parr.optJSONObject(i) ?: continue
                 val v0 = vs.size
                 val e0 = es.size
+                val t0 = ts.size
                 try {
                     val t = p.optString("t").lowercase()
                     val zero = doubleArrayOf(0.0, 0.0, 0.0)
@@ -98,7 +103,7 @@ class HoloModel(
                         "tor", "torus" -> 5
                         else -> 6
                     }
-                    addPart(p, vs, es)
+                    addPart(p, vs, es, ts)
                     if (vs.size == v0) continue
                     var kind = 0
                     var axis = doubleArrayOf(0.0, 1.0, 0.0)
@@ -134,6 +139,7 @@ class HoloModel(
                 } catch (ex: Exception) {
                     while (vs.size > v0) vs.removeAt(vs.size - 1)
                     while (es.size > e0) es.removeAt(es.size - 1)
+                    while (ts.size > t0) ts.removeAt(ts.size - 1)
                 }
             }
             if (vs.size < 3 || es.isEmpty() || tmps.isEmpty()) throw Exception("Model faka")
@@ -187,8 +193,15 @@ class HoloModel(
                 ef[2 * k + 1] = es[k][1]
                 er[k] = parts[vertPart[es[k][0]]].role
             }
+            val tf = IntArray(ts.size * 3)
+            for (k in ts.indices) {
+                tf[3 * k] = ts[k][0]
+                tf[3 * k + 1] = ts[k][1]
+                tf[3 * k + 2] = ts[k][2]
+            }
             return HoloModel(o.optString("name", "model").take(40), vf, ef,
-                parts.toTypedArray(), vertPart, er, groups.keys.toTypedArray(), partGroup)
+                parts.toTypedArray(), vertPart, er, groups.keys.toTypedArray(), partGroup,
+                tf, text.substring(s, e + 1))
         }
 
         private fun role(s: String): Int = when (s.lowercase()) {
@@ -210,7 +223,8 @@ class HoloModel(
             return doubleArrayOf(a.optDouble(0, d[0]), a.optDouble(1, d[1]), a.optDouble(2, d[2]))
         }
 
-        private fun addPart(p: JSONObject, vs: ArrayList<DoubleArray>, es: ArrayList<IntArray>) {
+        private fun addPart(p: JSONObject, vs: ArrayList<DoubleArray>, es: ArrayList<IntArray>,
+                            ts: ArrayList<IntArray>) {
             val t = p.optString("t").lowercase()
             val base = vs.size
             if (t == "line") {
@@ -223,28 +237,69 @@ class HoloModel(
             }
             val pos = arr(p, "p", doubleArrayOf(0.0, 0.0, 0.0))
             val sz = arr(p, "s", doubleArrayOf(1.0, 1.0, 1.0))
+            for (k in 0..2) sz[k] = abs(sz[k])
             val rot = arr(p, "r", doubleArrayOf(0.0, 0.0, 0.0))
             val seg = p.optInt("seg", 16).coerceIn(3, 48)
             val lv = ArrayList<DoubleArray>()
             val le = ArrayList<IntArray>()
+            val lt = ArrayList<IntArray>()
+            var torR = 0.0
             when (t) {
-                "box" -> box(lv, le)
-                "cyl", "cylinder" -> cyl(lv, le, seg)
-                "cone" -> cone(lv, le, seg)
-                "sph", "sphere" -> sph(lv, le, seg)
-                "pyr", "pyramid" -> pyr(lv, le)
+                "box" -> box(lv, le, lt)
+                "cyl", "cylinder" -> cyl(lv, le, lt, seg)
+                "cone" -> cone(lv, le, lt, seg)
+                "sph", "sphere" -> sph(lv, le, lt, seg)
+                "pyr", "pyramid" -> pyr(lv, le, lt)
                 "tor", "torus" -> {
                     val outer = maxOf(sz[0], 0.02)
                     val tube = minOf(maxOf(sz[1], 0.01), outer * 0.9)
-                    tor(lv, le, (outer - tube) / 2, tube / 2, if (p.has("seg")) maxOf(seg, 8) else 20)
+                    torR = (outer - tube) / 2
+                    tor(lv, le, lt, torR, tube / 2, if (p.has("seg")) maxOf(seg, 8) else 20)
                     sz[0] = 1.0
                     sz[1] = 1.0
                     sz[2] = 1.0
                 }
                 else -> return
             }
+            orient(lv, lt, torR)
             for (v in lv) vs.add(xf(v, sz, rot, pos))
             for (e in le) es.add(intArrayOf(e[0] + base, e[1] + base))
+            for (tr in lt) if (ts.size < 24000) ts.add(intArrayOf(tr[0] + base, tr[1] + base, tr[2] + base))
+        }
+
+        private fun orient(v: ArrayList<DoubleArray>, t: ArrayList<IntArray>, rBig: Double) {
+            for (tr in t) {
+                val a = v[tr[0]]
+                val b = v[tr[1]]
+                val c = v[tr[2]]
+                val ux = b[0] - a[0]
+                val uy = b[1] - a[1]
+                val uz = b[2] - a[2]
+                val wx = c[0] - a[0]
+                val wy = c[1] - a[1]
+                val wz = c[2] - a[2]
+                val nx = uy * wz - uz * wy
+                val ny = uz * wx - ux * wz
+                val nz = ux * wy - uy * wx
+                val cx = (a[0] + b[0] + c[0]) / 3
+                val cy = (a[1] + b[1] + c[1]) / 3
+                val cz = (a[2] + b[2] + c[2]) / 3
+                var rx = 0.0
+                val ry = 0.0
+                var rz = 0.0
+                if (rBig > 0.0) {
+                    val l = sqrt(cx * cx + cz * cz)
+                    if (l > 1e-9) {
+                        rx = cx / l * rBig
+                        rz = cz / l * rBig
+                    }
+                }
+                if (nx * (cx - rx) + ny * (cy - ry) + nz * (cz - rz) < 0.0) {
+                    val tmp = tr[1]
+                    tr[1] = tr[2]
+                    tr[2] = tmp
+                }
+            }
         }
 
         private fun xf(v: DoubleArray, s: DoubleArray, r: DoubleArray, p: DoubleArray): DoubleArray {
@@ -269,7 +324,7 @@ class HoloModel(
             return doubleArrayOf(x + p[0], y + p[1], z + p[2])
         }
 
-        private fun box(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>) {
+        private fun box(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, t: ArrayList<IntArray>) {
             for (i in 0 until 8) {
                 v.add(doubleArrayOf(
                     if ((i and 4) != 0) 0.5 else -0.5,
@@ -280,9 +335,16 @@ class HoloModel(
                 val d = a xor b
                 if (d == 1 || d == 2 || d == 4) e.add(intArrayOf(a, b))
             }
+            val q = arrayOf(
+                intArrayOf(0, 1, 3, 2), intArrayOf(4, 6, 7, 5), intArrayOf(0, 4, 5, 1),
+                intArrayOf(2, 3, 7, 6), intArrayOf(0, 2, 6, 4), intArrayOf(1, 5, 7, 3))
+            for (f in q) {
+                t.add(intArrayOf(f[0], f[1], f[2]))
+                t.add(intArrayOf(f[0], f[2], f[3]))
+            }
         }
 
-        private fun cyl(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, n: Int) {
+        private fun cyl(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, t: ArrayList<IntArray>, n: Int) {
             for (i in 0 until n) {
                 val a = 2.0 * Math.PI * i / n
                 v.add(doubleArrayOf(0.5 * cos(a), -0.5, 0.5 * sin(a)))
@@ -291,27 +353,37 @@ class HoloModel(
                 val a = 2.0 * Math.PI * i / n
                 v.add(doubleArrayOf(0.5 * cos(a), 0.5, 0.5 * sin(a)))
             }
+            v.add(doubleArrayOf(0.0, -0.5, 0.0))
+            v.add(doubleArrayOf(0.0, 0.5, 0.0))
             for (i in 0 until n) {
                 val j = (i + 1) % n
                 e.add(intArrayOf(i, j))
                 e.add(intArrayOf(n + i, n + j))
                 if (n <= 8 || i % 2 == 0) e.add(intArrayOf(i, n + i))
+                t.add(intArrayOf(i, j, n + j))
+                t.add(intArrayOf(i, n + j, n + i))
+                t.add(intArrayOf(2 * n, j, i))
+                t.add(intArrayOf(2 * n + 1, n + i, n + j))
             }
         }
 
-        private fun cone(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, n: Int) {
+        private fun cone(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, t: ArrayList<IntArray>, n: Int) {
             for (i in 0 until n) {
                 val a = 2.0 * Math.PI * i / n
                 v.add(doubleArrayOf(0.5 * cos(a), -0.5, 0.5 * sin(a)))
             }
             v.add(doubleArrayOf(0.0, 0.5, 0.0))
+            v.add(doubleArrayOf(0.0, -0.5, 0.0))
             for (i in 0 until n) {
-                e.add(intArrayOf(i, (i + 1) % n))
+                val j = (i + 1) % n
+                e.add(intArrayOf(i, j))
                 if (n <= 8 || i % 2 == 0) e.add(intArrayOf(i, n))
+                t.add(intArrayOf(i, j, n))
+                t.add(intArrayOf(n + 1, j, i))
             }
         }
 
-        private fun sph(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, n: Int) {
+        private fun sph(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, t: ArrayList<IntArray>, n: Int) {
             val kk = 5
             v.add(doubleArrayOf(0.0, 0.5, 0.0))
             v.add(doubleArrayOf(0.0, -0.5, 0.0))
@@ -335,9 +407,22 @@ class HoloModel(
                     }
                 }
             }
+            for (i in 0 until n) {
+                val j = (i + 1) % n
+                t.add(intArrayOf(0, 2 + j, 2 + i))
+                t.add(intArrayOf(1, 2 + (kk - 1) * n + i, 2 + (kk - 1) * n + j))
+                for (k in 0 until kk - 1) {
+                    val a = 2 + k * n + i
+                    val b = 2 + k * n + j
+                    val c2 = 2 + (k + 1) * n + j
+                    val d = 2 + (k + 1) * n + i
+                    t.add(intArrayOf(a, b, c2))
+                    t.add(intArrayOf(a, c2, d))
+                }
+            }
         }
 
-        private fun pyr(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>) {
+        private fun pyr(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, t: ArrayList<IntArray>) {
             v.add(doubleArrayOf(-0.5, -0.5, -0.5))
             v.add(doubleArrayOf(0.5, -0.5, -0.5))
             v.add(doubleArrayOf(0.5, -0.5, 0.5))
@@ -346,10 +431,14 @@ class HoloModel(
             for (i in 0 until 4) {
                 e.add(intArrayOf(i, (i + 1) % 4))
                 e.add(intArrayOf(i, 4))
+                t.add(intArrayOf(i, (i + 1) % 4, 4))
             }
+            t.add(intArrayOf(0, 2, 1))
+            t.add(intArrayOf(0, 3, 2))
         }
 
-        private fun tor(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, rBig: Double, rSmall: Double, mj: Int) {
+        private fun tor(v: ArrayList<DoubleArray>, e: ArrayList<IntArray>, t: ArrayList<IntArray>,
+                        rBig: Double, rSmall: Double, mj: Int) {
             val mn = 8
             for (i in 0 until mj) {
                 val u = 2.0 * Math.PI * i / mj
@@ -360,9 +449,13 @@ class HoloModel(
                 }
             }
             for (i in 0 until mj) {
+                val i1 = (i + 1) % mj
                 for (j in 0 until mn) {
-                    e.add(intArrayOf(i * mn + j, i * mn + (j + 1) % mn))
-                    e.add(intArrayOf(i * mn + j, ((i + 1) % mj) * mn + j))
+                    val j1 = (j + 1) % mn
+                    e.add(intArrayOf(i * mn + j, i * mn + j1))
+                    e.add(intArrayOf(i * mn + j, i1 * mn + j))
+                    t.add(intArrayOf(i * mn + j, i * mn + j1, i1 * mn + j1))
+                    t.add(intArrayOf(i * mn + j, i1 * mn + j1, i1 * mn + j))
                 }
             }
         }
