@@ -155,7 +155,7 @@ class JarvisService : Service() {
     private var tmpWake: DoubleArray? = null
     private var tmpWakeThr = 0.45
 
-    private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
+    private fun prefs() = Secure.prefs(this)
     private fun lang() = prefs().getString("l", "bn-BD") ?: "bn-BD"
     private fun tr(bn: String, en: String) = if (lang() == "bn-BD") bn else en
     private fun ack() = tr("জি, বলুন", "Yes?")
@@ -645,7 +645,7 @@ class JarvisService : Service() {
         enrolling = false
         waking = false
         talking = true
-        trusted = true
+        trusted = prefs().getBoolean("tb", false)
         endAfter = false
         misses = 0
         rejects = 0
@@ -669,6 +669,11 @@ class JarvisService : Service() {
     // ---------- Listening ----------
 
     private fun listen() {
+                if (talking && lockOn() && !cmdLock() && !trusted) {
+            say("Voice lock er jonno abar voice shekhao (SETTINGS)")
+            endTalk()
+            return
+        }
         if (talking && cmdLock()) listenAudio() else listenSR()
     }
 
