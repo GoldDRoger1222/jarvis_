@@ -50,6 +50,7 @@ class MainActivity : Activity() {
     private lateinit var lockBtn: Button
     private lateinit var strictBtn: Button
     private lateinit var oneBtn: Button
+    private lateinit var tbBtn: Button
     private lateinit var holo: HoloView
     private lateinit var holoStatus: TextView
     private lateinit var holoInput: EditText
@@ -64,7 +65,7 @@ class MainActivity : Activity() {
     private val pitchNames = arrayOf("Mota", "Normal", "Sharu")
     private val strictNames = arrayOf("Lenient (shohoje chine)", "Normal", "Strict (kothin)")
 
-    private fun prefs() = getSharedPreferences("j", MODE_PRIVATE)
+    private fun prefs() = Secure.prefs(this)
     private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
 
     // ---------- UI helpers ----------
@@ -350,11 +351,13 @@ class MainActivity : Activity() {
         lockBtn = hudBtn("") { toggleLock() }
         strictBtn = hudBtn("") { cycle("vs") }
         oneBtn = hudBtn("") { toggleOne() }
+        tbBtn = hudBtn("") { toggleTb() }
         val c3 = card("SECURITY")
         c3.addView(hudBtn("Amar voice shekhao (8 bar Jarvis + 5 lomba bakko)") { go("ENROLL") }, full(10))
         c3.addView(lockBtn, full(8))
         c3.addView(strictBtn, full(8))
         c3.addView(oneBtn, full(8))
+        c3.addView(tbBtn, full(8))
         l.addView(c3, full(12))
 
         val c4 = card("PERMISSIONS (ekbar koro)")
@@ -409,6 +412,11 @@ class MainActivity : Activity() {
         refreshBtns()
     }
 
+    private fun toggleTb() {
+        prefs().edit().putBoolean("tb", !prefs().getBoolean("tb", false)).apply()
+        refreshBtns()
+    }
+
     private fun cycle(k: String) {
         prefs().edit().putInt(k, (prefs().getInt(k, 1) + 1) % 3).apply()
         refreshBtns()
@@ -434,6 +442,8 @@ class MainActivity : Activity() {
         }
         strictBtn.text = "Lock strictness: " + strictNames[prefs().getInt("vs", 1).coerceIn(0, 2)]
         oneBtn.text = if (prefs().getBoolean("oc", false)) "Ek wake e ek kaj: ON" else "Ek wake e ek kaj: OFF"
+        tbBtn.text = if (prefs().getBoolean("tb", false)) "TALK button e voice check: OFF (nijer phone, shohoj)"
+        else "TALK button e voice check: ON (nirapod)"
         chipTv.text = "Voice lock " + (if (lockOn) "ON" else "OFF") + "  •  " +
             (if (offline) "Offline wake" else "Online wake") + "  •  " + langName
     }
