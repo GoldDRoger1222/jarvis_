@@ -48,7 +48,7 @@ Example (single cylinder engine, shortened):
 """.trimIndent()
 
     fun generate(ctx: Context, desc: String, previous: String?): String {
-        val key = ctx.getSharedPreferences("j", Context.MODE_PRIVATE).getString("k", "")?.trim().orEmpty()
+        val key = Secure.prefs(ctx).getString("k", "")?.trim().orEmpty()
         if (key.isEmpty()) throw Exception("Gemini key nai, main Jarvis app e dao")
         val prompt = if (previous.isNullOrBlank()) spec + "\n\nObject to design: " + desc
         else spec + "\n\nCurrent model:\n" + previous +
@@ -64,7 +64,7 @@ Example (single cylinder engine, shortened):
         groups: List<String>,
         status: ((String) -> Unit)? = null
     ): String {
-        val sp = ctx.getSharedPreferences("j", Context.MODE_PRIVATE)
+        val sp = Secure.prefs(ctx)
         val key = sp.getString("k", "")?.trim().orEmpty()
         if (key.isEmpty()) throw Exception("Gemini key nai, main Jarvis app e dao")
         val bn = (sp.getString("l", "bn-BD") ?: "bn-BD") == "bn-BD"
