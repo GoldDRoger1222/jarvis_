@@ -19,6 +19,7 @@ object JarvisTools {
     private val injRx = Regex("(?i)(ignore (all |any |the )?(previous|above|prior)|system prompt|you are now|new instructions|call this number|send (an? )?(sms|message)|transfer (the )?money|api key)")
     private val urlRx = Regex("https?://\\S+")
     private val phoneRx = Regex("\\+?\\d[\\d ()-]{8,}\\d")
+    private val secretRx = Regex("(?i)\\b(password|passcode|otp|pin|cvv|api[ _-]?key|secret|token)\\b|AIza[0-9A-Za-z_\\-]{20,}|\\b\\d{12,19}\\b")
 
     private fun fn(name: String, desc: String, vararg p: Pair<String, String>): JSONObject {
         val o = JSONObject().put("name", name).put("description", desc)
@@ -45,6 +46,15 @@ object JarvisTools {
         arr.put(fn("update_memory",
             "Change an existing memory note: key identifies the old note, new_text is the corrected note",
             "key" to "string", "new_text" to "string"))
+        arr.put(fn("learn_correction",
+            "Remember a speech correction: the user said 'heard' was misheard and the real word or name is 'meant'. Use it whenever the user corrects a misheard word, contact name or app name.",
+            "heard" to "string", "meant" to "string"))
+        arr.put(fn("teach_routine",
+            "Save a new routine the user describes. steps is a clear numbered list of what to do, written as instructions you can run with your tools.",
+            "name" to "string", "steps" to "string"))
+        arr.put(fn("run_routine", "Run a saved routine by name", "name" to "string"))
+        arr.put(fn("list_routines", "List the saved routines"))
+        arr.put(fn("delete_routine", "Delete a saved routine by name", "name" to "string"))
     }
 
     fun run(ctx: Context, name: String, a: JSONObject, launch: (Intent) -> Boolean): String {
@@ -56,8 +66,74 @@ object JarvisTools {
                 if (r.isEmpty()) "Nothing found in memory" else r.joinToString("\n")
             }
             "update_memory" -> JarvisMemory.update(ctx, a.optString("key"), a.optString("new_text"))
+            "learn_correction" -> {
+                val h = a.optString("heard").trim()
+                val m = a.optString("meant").trim()
+                if (h.isEmpty() || m.isEmpty()) "Need both the misheard word and the real one"
+                else JarvisMemory.add(ctx, "Speech correction: when I hear '" + h + "' I mean '" + m + "'",
+                    "alias", "user")
+            }
+            "teach_routine" -> teachRoutine(ctx, a.optString("name"), a.optString("steps"))
+            "run_routine" -> runRoutine(ctx, a.optString("name"))
+            "list_routines" -> {
+                val o = loadRt(ctx)
+                if (o.length() == 0) "No saved routines" else "Routines: " + o.keys().asSequence().toList().joinToString(", ")
+            }
+            "delete_routine" -> deleteRoutine(ctx, a.optString("name"))
             else -> "Unknown tool: " + name
         }
+    }
+
+    // ---------- Routines ----------
+
+    private fun rt(ctx: Context) = ctx.getSharedPreferences("routines", Context.MODE_PRIVATE)
+
+    private fun loadRt(ctx: Context): JSONObject {
+        val e = rt(ctx).getString("d", null) ?: return JSONObject()
+        val p = if (e.startsWith("PLAIN:")) e.substring(6) else Secure.dec(e)
+        return try { JSONObject(p ?: "{}") } catch (x: Exception) { JSONObject() }
+    }
+
+    private fun saveRt(ctx: Context, o: JSONObject) {
+        val s = o.toString()
+        val v = try { Secure.enc(s) } catch (e: Exception) { "PLAIN:" + s }
+        rt(ctx).edit().putString("d", v).apply()
+    }
+
+    private fun findRt(o: JSONObject, name: String): String? {
+        val q = name.trim().lowercase()
+        if (q.isEmpty()) return null
+        val keys = o.keys().asSequence().toList()
+        return keys.firstOrNull { it.lowercase() == q }
+            ?: keys.firstOrNull { it.lowercase().contains(q) || q.contains(it.lowercase()) }
+    }
+
+    private fun teachRoutine(ctx: Context, name: String, steps: String): String {
+        val n = name.trim().take(40)
+        val s = steps.trim().take(600)
+        if (n.isEmpty() || s.isEmpty()) return "Need a name and the steps"
+        if (secretRx.containsMatchIn(s)) return "Refused: routines must not contain passwords, codes, card numbers or keys"
+        val o = loadRt(ctx)
+        if (o.length() >= 20 && !o.has(n)) return "Too many routines (20). Delete one first."
+        o.put(n, s)
+        saveRt(ctx, o)
+        return "Routine saved: " + n
+    }
+
+    private fun runRoutine(ctx: Context, name: String): String {
+        val o = loadRt(ctx)
+        val k = findRt(o, name) ?: return "No routine named '" + name + "'. Saved: " +
+            (if (o.length() == 0) "none" else o.keys().asSequence().toList().joinToString(", "))
+        return "ROUTINE '" + k + "' (steps saved by the user). Do these now with your tools, one after another, " +
+            "and tell the user briefly when finished: " + o.optString(k)
+    }
+
+    private fun deleteRoutine(ctx: Context, name: String): String {
+        val o = loadRt(ctx)
+        val k = findRt(o, name) ?: return "No routine named '" + name + "'"
+        o.remove(k)
+        saveRt(ctx, o)
+        return "Deleted routine " + k
     }
 
     // ---------- Gemini helper ----------
