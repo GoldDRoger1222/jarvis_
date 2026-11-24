@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.jarvis"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "3.1"
+        versionCode = 6
+        versionName = "4.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
     signingConfigs {
@@ -32,4 +32,5 @@ android {
 dependencies {
     implementation("com.alphacephei:vosk-android:0.3.47")
     implementation("net.java.dev.jna:jna:5.13.0@aar")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
