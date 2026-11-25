@@ -38,27 +38,17 @@
             android:theme="@android:style/Theme.Material.NoActionBar" />
         <activity
             android:name=".InventionActivity"
-            android:exported="true"
-            android:label="Jarvis Invent"
+            android:exported="false"
+            android:label="Invention Lab"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@android:style/Theme.Material.NoActionBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:theme="@android:style/Theme.Material.NoActionBar" />
         <activity
             android:name=".LiveActivity"
-            android:exported="true"
+            android:exported="false"
             android:label="Jarvis Live"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:theme="@android:style/Theme.Material.NoActionBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:theme="@android:style/Theme.Material.NoActionBar" />
         <service
             android:name=".JarvisService"
             android:exported="false"
