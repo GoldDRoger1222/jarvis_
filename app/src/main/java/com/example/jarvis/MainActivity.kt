@@ -264,6 +264,12 @@ class MainActivity : Activity() {
         row.addView(talk, half(10))
         l.addView(row, full(10))
 
+        val row2 = LinearLayout(this)
+        row2.orientation = LinearLayout.HORIZONTAL
+        row2.addView(hudBtn("Jarvis Live") { startActivity(Intent(this, LiveActivity::class.java)) }, half())
+        row2.addView(hudBtn("Invention Lab") { startActivity(Intent(this, InventionActivity::class.java)) }, half(10))
+        l.addView(row2, full(0))
+
         val c = card("TRANSCRIPT")
         log = TextView(this)
         log.setTextColor(txtC)
@@ -334,6 +340,7 @@ class MainActivity : Activity() {
         c1.addView(gemBox, full(10))
         c1.addView(nickBox, full(8))
         c1.addView(personaBox, full(8))
+        c1.addView(hudBtn("AI Providers (OpenRouter, Live voice)") { Providers.show(this) }, full(8))
         l.addView(c1, full(6))
 
         langBtn = hudBtn("") { toggleLang() }
