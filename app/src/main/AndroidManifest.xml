@@ -18,6 +18,18 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="mailto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="smsto" />
+        </intent>
     </queries>
     <application
         android:label="Jarvis"
@@ -47,6 +59,19 @@
             android:name=".LiveActivity"
             android:exported="false"
             android:label="Jarvis Live"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity
+            android:name=".LabActivity"
+            android:exported="false"
+            android:label="Research Lab"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity
+            android:name=".SitePreviewActivity"
+            android:exported="false"
+            android:label="Site Preview"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:theme="@android:style/Theme.Material.NoActionBar" />
         <service
